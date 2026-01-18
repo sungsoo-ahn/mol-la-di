@@ -1,4 +1,5 @@
 # QM9 Debug Configuration - Small dataset for rapid debugging
+# Optimized settings achieve loss ~0.515 (node=0.507, edge=0.008)
 
 output_dir: "data/qm9_debug"
 seed: 42
@@ -13,7 +14,7 @@ data:
   debug: true
   debug_samples: 128  # Single batch size
 
-# Model architecture - full size for proper learning
+# Model architecture
 model:
   num_atom_types: 5  # 0=empty, 1=C, 2=N, 3=O, 4=F (no H, added by RDKit)
   num_bond_types: 5
@@ -21,18 +22,21 @@ model:
   nhead: 8
   num_layers: 6
   dim_feedforward: 1024
-  dropout: 0.1
+  dropout: 0.0  # No dropout for memorization task
 
-# Training settings
+# Training settings - optimized for loss minimization
 training:
-  epochs: 1000
+  epochs: 5000
   batch_size: 128
   eval_batch_size: 128
   lr: 1.0e-3
-  weight_decay: 0.01
-  use_scheduler: false
-  save_every: 200
-  eval_every: 100  # Evaluate every 100 epochs
+  min_lr: 1.0e-5
+  weight_decay: 0.0  # No weight decay for memorization
+  max_grad_norm: 1.0
+  warmup_epochs: 0
+  use_scheduler: true  # Cosine annealing for stable convergence
+  save_every: 1000
+  eval_every: 1000
 
 # Evaluation settings
 eval:
@@ -42,6 +46,6 @@ eval:
 
 # Weights & Biases settings
 wandb:
-  enabled: true
+  enabled: false  # Disable for debug runs
   project: "molecule-generation"
   name: "qm9_debug"
