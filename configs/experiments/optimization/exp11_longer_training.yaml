@@ -1,0 +1,43 @@
+# Experiment 11: Long Training with Good LR
+# Goal: Push loss as low as possible with working settings
+
+output_dir: "data/optimization/exp11_longer_training"
+seed: 42
+device: "cuda"
+
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  max_atoms: 9
+  num_workers: 0
+  debug: true
+  debug_samples: 128
+
+model:
+  num_atom_types: 5
+  num_bond_types: 5
+  d_model: 256
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 1024
+  dropout: 0.0
+
+training:
+  epochs: 10000
+  batch_size: 128
+  eval_batch_size: 128
+  lr: 1.0e-3  # Working LR
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  warmup_epochs: 0
+  use_scheduler: false
+  save_every: 5000
+  eval_every: 5000
+
+eval:
+  n_samples: 64
+  final_n_samples: 128
+  temperature: 1.0
+
+wandb:
+  enabled: false

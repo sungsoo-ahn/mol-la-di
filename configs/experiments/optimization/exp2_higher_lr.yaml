@@ -1,0 +1,41 @@
+# Experiment 2: Higher Learning Rate
+# Goal: Test if higher LR with no regularization converges faster
+
+output_dir: "data/optimization/exp2_higher_lr"
+seed: 42
+device: "cuda"
+
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  max_atoms: 9
+  num_workers: 0
+  debug: true
+  debug_samples: 128
+
+model:
+  num_atom_types: 5
+  num_bond_types: 5
+  d_model: 256
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 1024
+  dropout: 0.0
+
+training:
+  epochs: 200
+  batch_size: 128
+  eval_batch_size: 128
+  lr: 1.0e-2  # CHANGED: was 1e-3, now 10x higher
+  weight_decay: 0.0
+  use_scheduler: false
+  save_every: 200
+  eval_every: 200
+
+eval:
+  n_samples: 64
+  final_n_samples: 128
+  temperature: 1.0
+
+wandb:
+  enabled: false

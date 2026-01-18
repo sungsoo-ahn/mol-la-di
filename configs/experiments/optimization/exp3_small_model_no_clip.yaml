@@ -1,0 +1,42 @@
+# Experiment 3: Smaller Model + No Gradient Clipping
+# Goal: Test if smaller model breaks the loss plateau
+
+output_dir: "data/optimization/exp3_small_model_no_clip"
+seed: 42
+device: "cuda"
+
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  max_atoms: 9
+  num_workers: 0
+  debug: true
+  debug_samples: 128
+
+model:
+  num_atom_types: 5
+  num_bond_types: 5
+  d_model: 128       # CHANGED: was 256
+  nhead: 4           # CHANGED: was 8
+  num_layers: 2      # CHANGED: was 6
+  dim_feedforward: 512  # CHANGED: was 1024
+  dropout: 0.0
+
+training:
+  epochs: 500
+  batch_size: 128
+  eval_batch_size: 128
+  lr: 1.0e-2
+  weight_decay: 0.0
+  max_grad_norm: 0.0  # CHANGED: disable gradient clipping
+  use_scheduler: false
+  save_every: 500
+  eval_every: 500
+
+eval:
+  n_samples: 64
+  final_n_samples: 128
+  temperature: 1.0
+
+wandb:
+  enabled: false

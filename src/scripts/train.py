@@ -74,9 +74,18 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     epoch: int,
+    max_grad_norm: float = 1.0,
+    warmup_epochs: int = 0,
+    base_lr: float = 1e-3,
 ) -> dict:
     """Train for one epoch."""
     model.train()
+
+    # Apply warmup
+    if warmup_epochs > 0 and epoch <= warmup_epochs:
+        warmup_factor = epoch / warmup_epochs
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = base_lr * warmup_factor
 
     totals = {'loss': 0.0, 'node_loss': 0.0, 'edge_loss': 0.0}
     n_batches = 0
@@ -86,7 +95,8 @@ def train_epoch(
         optimizer.zero_grad()
         loss, metrics = _compute_batch_loss(model, batch, device)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
         optimizer.step()
 
         for key in totals:
@@ -267,9 +277,19 @@ def main(config_path: str):
     best_val_loss = float('inf')
     results_history = []
 
+    # Get training hyperparameters
+    max_grad_norm = train_config.get('max_grad_norm', 1.0)
+    warmup_epochs = train_config.get('warmup_epochs', 0)
+    base_lr = train_config.get('lr', 1e-4)
+
     for epoch in range(1, train_config['epochs'] + 1):
         # Train
-        train_metrics = train_epoch(model, train_loader, optimizer, device, epoch)
+        train_metrics = train_epoch(
+            model, train_loader, optimizer, device, epoch,
+            max_grad_norm=max_grad_norm,
+            warmup_epochs=warmup_epochs,
+            base_lr=base_lr,
+        )
         logger.info(f"Epoch {epoch} - Train: {train_metrics}")
 
         # Validate

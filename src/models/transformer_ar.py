@@ -52,12 +52,14 @@ class TransformerARModel(nn.Module):
         num_layers: int = 6,
         dim_feedforward: int = 1024,
         dropout: float = 0.1,
+        edge_loss_weight: float = 1.0,
     ):
         super().__init__()
         self.max_atoms = max_atoms
         self.num_atom_types = num_atom_types
         self.num_bond_types = num_bond_types
         self.d_model = d_model
+        self.edge_loss_weight = edge_loss_weight
 
         # Sequence lengths
         self.num_node_tokens = max_atoms
@@ -71,21 +73,24 @@ class TransformerARModel(nn.Module):
         # Token type embedding (0: node, 1: edge)
         self.token_type_embedding = nn.Embedding(2, d_model)
 
-        # Position embedding
-        self.pos_encoding = PositionalEncoding(d_model, max_len=self.seq_len + 1)
+        # Position embedding - learned instead of sinusoidal
+        self.pos_embedding = nn.Embedding(self.seq_len + 1, d_model)
+
+        # Scaling factor for embeddings (GPT-style)
+        self.embed_scale = math.sqrt(d_model)
 
         # Start token
         self.start_token = nn.Parameter(torch.randn(1, 1, d_model))
 
-        # Transformer decoder
-        decoder_layer = nn.TransformerDecoderLayer(
+        # Transformer encoder (used as decoder-only with causal mask)
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
         )
-        self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         # Output heads
         self.node_head = nn.Linear(d_model, num_atom_types)
@@ -93,6 +98,24 @@ class TransformerARModel(nn.Module):
 
         # Causal mask
         self._init_causal_mask()
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights with small scale for stable training."""
+        # Embedding initialization
+        nn.init.normal_(self.node_embedding.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.edge_embedding.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.token_type_embedding.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.pos_embedding.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.start_token, mean=0.0, std=0.02)
+
+        # Output head initialization
+        nn.init.normal_(self.node_head.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.node_head.bias)
+        nn.init.normal_(self.edge_head.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.edge_head.bias)
 
     def _init_causal_mask(self):
         """Initialize causal attention mask."""
@@ -180,6 +203,9 @@ class TransformerARModel(nn.Module):
         # For predicting position i, we use [start, ..., token_{i-1}]
         seq_embed = torch.cat([start, node_embed, edge_embed], dim=1)  # (batch, seq_len+1, d_model)
 
+        # Scale embeddings
+        seq_embed = seq_embed * self.embed_scale
+
         # Add token type embeddings
         token_types = torch.cat([
             torch.zeros(batch_size, 1 + self.num_node_tokens, dtype=torch.long, device=device),
@@ -187,16 +213,14 @@ class TransformerARModel(nn.Module):
         ], dim=1)
         seq_embed = seq_embed + self.token_type_embedding(token_types)
 
-        # Add positional encoding
-        seq_embed = self.pos_encoding(seq_embed)
+        # Add learned positional embedding
+        positions = torch.arange(seq_embed.size(1), device=device)
+        seq_embed = seq_embed + self.pos_embedding(positions)
 
         # Apply transformer with causal mask
-        # We use decoder-only architecture, so memory is just zeros
-        memory = torch.zeros(batch_size, 1, self.d_model, device=device)
         output = self.transformer(
             seq_embed,
-            memory,
-            tgt_mask=self.causal_mask,
+            mask=self.causal_mask,
         )  # (batch, seq_len+1, d_model)
 
         # Split output into node and edge predictions
@@ -247,25 +271,12 @@ class TransformerARModel(nn.Module):
             reduction='none',
         ).reshape(batch_size, -1)
 
-        # Apply masking if num_atoms provided
-        if num_atoms is not None:
-            # Create node mask
-            node_mask = torch.arange(self.max_atoms, device=device).unsqueeze(0) < num_atoms.unsqueeze(1)
-            node_loss = (node_loss * node_mask.float()).sum() / node_mask.sum()
+        # For autoregressive training, we don't mask - model should learn
+        # to predict empty atoms (type 0) at padding positions
+        node_loss = node_loss.mean()
+        edge_loss = edge_loss.mean()
 
-            # Create edge mask (only edges between valid nodes)
-            edge_mask = []
-            for i in range(self.max_atoms):
-                for j in range(i + 1, self.max_atoms):
-                    valid = (i < num_atoms) & (j < num_atoms)
-                    edge_mask.append(valid)
-            edge_mask = torch.stack(edge_mask, dim=1).float()
-            edge_loss = (edge_loss * edge_mask).sum() / edge_mask.sum().clamp(min=1)
-        else:
-            node_loss = node_loss.mean()
-            edge_loss = edge_loss.mean()
-
-        total_loss = node_loss + edge_loss
+        total_loss = node_loss + self.edge_loss_weight * edge_loss
 
         metrics = {
             'loss': total_loss.item(),
@@ -306,17 +317,20 @@ class TransformerARModel(nn.Module):
 
         # Sample nodes first
         for i in range(self.num_node_tokens):
-            # Add token type and position encoding
+            # Scale and add token type embedding
+            curr_embed = seq_embed * self.embed_scale
             token_types = torch.zeros(batch_size, seq_embed.size(1), dtype=torch.long, device=device)
-            curr_embed = seq_embed + self.token_type_embedding(token_types)
-            curr_embed = self.pos_encoding(curr_embed)
+            curr_embed = curr_embed + self.token_type_embedding(token_types)
+
+            # Add learned positional embedding
+            positions = torch.arange(seq_embed.size(1), device=device)
+            curr_embed = curr_embed + self.pos_embedding(positions)
 
             # Get causal mask for current length
             curr_mask = self.causal_mask[:seq_embed.size(1), :seq_embed.size(1)]
 
             # Forward pass
-            memory = torch.zeros(batch_size, 1, self.d_model, device=device)
-            output = self.transformer(curr_embed, memory, tgt_mask=curr_mask)
+            output = self.transformer(curr_embed, mask=curr_mask)
 
             # Get logits for next token
             logits = self.node_head(output[:, -1]) / temperature
@@ -325,25 +339,28 @@ class TransformerARModel(nn.Module):
 
             sampled_nodes.append(next_token)
 
-            # Embed and append
+            # Embed and append (unscaled, scaling applied later)
             next_embed = self.node_embedding(next_token).unsqueeze(1)
             seq_embed = torch.cat([seq_embed, next_embed], dim=1)
 
         # Sample edges
         for i in range(self.num_edge_tokens):
-            # Add token type and position encoding
+            # Scale and add token type embedding
+            curr_embed = seq_embed * self.embed_scale
             token_types = torch.cat([
                 torch.zeros(batch_size, 1 + self.num_node_tokens, dtype=torch.long, device=device),
                 torch.ones(batch_size, i, dtype=torch.long, device=device),
             ], dim=1) if i > 0 else torch.zeros(batch_size, 1 + self.num_node_tokens, dtype=torch.long, device=device)
 
-            curr_embed = seq_embed + self.token_type_embedding(token_types)
-            curr_embed = self.pos_encoding(curr_embed)
+            curr_embed = curr_embed + self.token_type_embedding(token_types)
+
+            # Add learned positional embedding
+            positions = torch.arange(seq_embed.size(1), device=device)
+            curr_embed = curr_embed + self.pos_embedding(positions)
 
             curr_mask = self.causal_mask[:seq_embed.size(1), :seq_embed.size(1)]
 
-            memory = torch.zeros(batch_size, 1, self.d_model, device=device)
-            output = self.transformer(curr_embed, memory, tgt_mask=curr_mask)
+            output = self.transformer(curr_embed, mask=curr_mask)
 
             logits = self.edge_head(output[:, -1]) / temperature
             probs = F.softmax(logits, dim=-1)
@@ -376,4 +393,5 @@ def build_model(config: dict) -> TransformerARModel:
         num_layers=model_config.get('num_layers', 6),
         dim_feedforward=model_config.get('dim_feedforward', 1024),
         dropout=model_config.get('dropout', 0.1),
+        edge_loss_weight=model_config.get('edge_loss_weight', 1.0),
     )
