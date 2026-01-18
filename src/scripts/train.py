@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+import io
 
 import numpy as np
 import torch
@@ -14,11 +15,13 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 import wandb
+from rdkit.Chem import Draw
+from PIL import Image
 
 from src.utils import load_config, setup_output_dir, set_seed, get_device, count_parameters
 from src.data.molecule_dataset import MoleculeDataset, get_dataloader, ATOM_TYPES
 from src.models.transformer_ar import build_model
-from src.evaluation import MoleculeEvaluator
+from src.evaluation import MoleculeEvaluator, adj_to_mol, mol_to_smiles
 
 
 def setup_logging(output_dir: Path) -> logging.Logger:
@@ -141,8 +144,8 @@ def sample_and_evaluate(
     device: torch.device,
     temperature: float = 1.0,
     batch_size: int = 100,
-) -> dict:
-    """Sample molecules and evaluate them."""
+) -> tuple:
+    """Sample molecules and evaluate them. Returns (metrics, valid_mols)."""
     model.eval()
 
     all_node_types = []
@@ -162,7 +165,34 @@ def sample_and_evaluate(
     all_node_types = np.concatenate(all_node_types, axis=0)
     all_adj_matrices = np.concatenate(all_adj_matrices, axis=0)
 
-    return evaluator.evaluate(all_node_types, all_adj_matrices)
+    metrics = evaluator.evaluate(all_node_types, all_adj_matrices)
+
+    # Collect valid molecules for visualization
+    valid_mols = []
+    atom_decoder = evaluator.atom_decoder
+    for i in range(len(all_node_types)):
+        mol = adj_to_mol(all_node_types[i], all_adj_matrices[i], atom_decoder)
+        if mol is not None:
+            smiles = mol_to_smiles(mol)
+            if smiles is not None:
+                valid_mols.append(mol)
+
+    return metrics, valid_mols
+
+
+def create_molecule_grid_image(mols, n_mols=20, n_cols=5, mol_size=(250, 250)):
+    """Create a grid image of molecules for W&B logging."""
+    mols_to_draw = mols[:n_mols]
+    if not mols_to_draw:
+        return None
+
+    img = Draw.MolsToGridImage(
+        mols_to_draw,
+        molsPerRow=n_cols,
+        subImgSize=mol_size,
+        legends=[f"Mol {i+1}" for i in range(len(mols_to_draw))],
+    )
+    return img
 
 
 def save_checkpoint(
@@ -331,7 +361,7 @@ def main(config_path: str):
         # Sample and evaluate
         if epoch % train_config.get('eval_every', 10) == 0:
             logger.info("Sampling and evaluating...")
-            sample_metrics = sample_and_evaluate(
+            sample_metrics, valid_mols = sample_and_evaluate(
                 model, evaluator,
                 n_samples=config.get('eval', {}).get('n_samples', 1000),
                 device=device,
@@ -339,9 +369,20 @@ def main(config_path: str):
             )
             logger.info(f"Epoch {epoch} - Sample metrics: {sample_metrics}")
 
-            # Log sample metrics to W&B
+            # Log sample metrics and molecule images to W&B
             if use_wandb:
-                wandb.log(_filter_wandb_metrics(sample_metrics, 'sample'))
+                wandb_log = _filter_wandb_metrics(sample_metrics, 'sample')
+
+                # Create and log molecule visualization
+                if valid_mols:
+                    mol_img = create_molecule_grid_image(valid_mols, n_mols=20, n_cols=5)
+                    if mol_img is not None:
+                        wandb_log['generated_molecules'] = wandb.Image(
+                            mol_img,
+                            caption=f"Epoch {epoch}: {len(valid_mols)} valid molecules (showing 20)"
+                        )
+
+                wandb.log(wandb_log)
 
             # Save sample metrics
             sample_metrics['epoch'] = epoch
@@ -353,7 +394,7 @@ def main(config_path: str):
     # Final evaluation
     logger.info("Final evaluation...")
     load_checkpoint(output_dir / 'checkpoints' / 'best.pt', model)
-    final_metrics = sample_and_evaluate(
+    final_metrics, final_valid_mols = sample_and_evaluate(
         model, evaluator,
         n_samples=config.get('eval', {}).get('final_n_samples', 10000),
         device=device,
@@ -361,9 +402,20 @@ def main(config_path: str):
     )
     logger.info(f"Final metrics: {final_metrics}")
 
-    # Log final metrics to W&B
+    # Log final metrics and molecules to W&B
     if use_wandb:
-        wandb.log(_filter_wandb_metrics(final_metrics, 'final'))
+        final_wandb_log = _filter_wandb_metrics(final_metrics, 'final')
+
+        # Log final molecule visualization (more molecules for final)
+        if final_valid_mols:
+            final_mol_img = create_molecule_grid_image(final_valid_mols, n_mols=50, n_cols=10)
+            if final_mol_img is not None:
+                final_wandb_log['final_generated_molecules'] = wandb.Image(
+                    final_mol_img,
+                    caption=f"Final: {len(final_valid_mols)} valid molecules (showing 50)"
+                )
+
+        wandb.log(final_wandb_log)
         wandb.finish()
 
     with open(output_dir / 'results' / 'final_metrics.json', 'w') as f:

@@ -7,11 +7,28 @@ from pathlib import Path
 import numpy as np
 import torch
 from tqdm import tqdm
+from rdkit import Chem
+from rdkit.Chem import Draw
 
 from src.utils import load_config, setup_output_dir, set_seed, get_device
 from src.data.molecule_dataset import MoleculeDataset, ATOM_TYPES
 from src.models.transformer_ar import build_model
 from src.evaluation import MoleculeEvaluator, adj_to_mol, mol_to_smiles
+
+
+def visualize_molecules(mols, output_path, n_cols=5, mol_size=(300, 300)):
+    """Visualize molecules in a grid and save to file."""
+    n_mols = len(mols)
+    n_rows = (n_mols + n_cols - 1) // n_cols
+
+    img = Draw.MolsToGridImage(
+        mols,
+        molsPerRow=n_cols,
+        subImgSize=mol_size,
+        legends=[f"Mol {i+1}" for i in range(n_mols)],
+    )
+    img.save(output_path)
+    print(f"Saved molecule visualization to {output_path}")
 
 
 def load_model(config: dict, checkpoint_path: str, device: torch.device):
@@ -126,20 +143,40 @@ def main(config_path: str):
     with open(output_dir / 'metrics.json', 'w') as f:
         json.dump(metrics, f, indent=2)
 
-    # Save generated SMILES
+    # Save generated SMILES and collect valid molecules
     smiles_list = []
+    valid_mols = []
     for i in range(len(node_types)):
         mol = adj_to_mol(node_types[i], adj_matrices[i], atom_decoder)
         if mol is not None:
             smiles = mol_to_smiles(mol)
             if smiles is not None:
                 smiles_list.append(smiles)
+                valid_mols.append(mol)
 
     with open(output_dir / 'generated_smiles.txt', 'w') as f:
         f.write('\n'.join(smiles_list))
 
     print(f"\nSaved {len(smiles_list)} valid SMILES to {output_dir / 'generated_smiles.txt'}")
     print(f"Metrics saved to {output_dir / 'metrics.json'}")
+
+    # Visualize molecules
+    if config.get('visualize', False) and valid_mols:
+        n_visualize = min(config.get('n_visualize', 50), len(valid_mols))
+        figures_dir = output_dir / 'figures'
+        figures_dir.mkdir(parents=True, exist_ok=True)
+
+        # Visualize first n molecules
+        visualize_molecules(
+            valid_mols[:n_visualize],
+            figures_dir / 'generated_molecules.png',
+            n_cols=5,
+        )
+
+        # Also save individual molecule images
+        for i, mol in enumerate(valid_mols[:min(10, n_visualize)]):
+            img = Draw.MolToImage(mol, size=(400, 400))
+            img.save(figures_dir / f'molecule_{i+1}.png')
 
 
 if __name__ == "__main__":

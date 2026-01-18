@@ -23,7 +23,7 @@ model:
 
 # Training settings - optimized from medium benchmark experiments
 training:
-  epochs: 100
+  epochs: 500  # Increased for full dataset convergence
   batch_size: 128
   eval_batch_size: 256
   lr: 1.0e-3  # Optimized: 10x higher LR with warmup
