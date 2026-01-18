@@ -1,0 +1,30 @@
+# QM9 Sampling Configuration
+
+output_dir: "data/qm9_ar_baseline/samples"
+checkpoint_dir: "data/qm9_ar_baseline"
+checkpoint_path: "data/qm9_ar_baseline/checkpoints/best.pt"
+
+seed: 42
+device: "cuda"
+
+# Data settings (for loading training smiles)
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  max_atoms: 9
+
+# Model settings (must match training)
+model:
+  num_atom_types: 5  # 0=empty, 1=C, 2=N, 3=O, 4=F (H added by RDKit)
+  num_bond_types: 5
+  d_model: 256
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 1024
+  dropout: 0.1
+
+# Sampling settings
+n_samples: 10000
+temperature: 1.0
+batch_size: 200
+compute_novelty: true
