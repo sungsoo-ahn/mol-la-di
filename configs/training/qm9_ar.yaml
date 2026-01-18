@@ -21,13 +21,15 @@ model:
   dim_feedforward: 1024
   dropout: 0.1
 
-# Training settings
+# Training settings - optimized from medium benchmark experiments
 training:
   epochs: 100
   batch_size: 128
   eval_batch_size: 256
-  lr: 1.0e-4
+  lr: 1.0e-3  # Optimized: 10x higher LR with warmup
   weight_decay: 0.01
+  max_grad_norm: 1.0  # Gradient clipping for stability
+  warmup_epochs: 10  # Essential for higher LR
   use_scheduler: true
   min_lr: 1.0e-6
   save_every: 20
