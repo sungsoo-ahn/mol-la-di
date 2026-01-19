@@ -268,7 +268,7 @@ def validate(
 
 @torch.no_grad()
 def sample_and_evaluate(
-    combined_model,  # LatentDiffusionWithVAE or LatentDiffusionWithRAE
+    combined_model: LatentDiffusionWithRAE,
     evaluator: MoleculeEvaluator,
     n_samples: int,
     device: torch.device,
@@ -276,10 +276,7 @@ def sample_and_evaluate(
     temperature: float = 1.0,
     batch_size: int = 100,
 ) -> tuple:
-    """Sample molecules and evaluate them.
-
-    Works with both LatentDiffusionWithVAE and LatentDiffusionWithRAE.
-    """
+    """Sample molecules and evaluate them."""
     combined_model.eval()
 
     all_node_types = []

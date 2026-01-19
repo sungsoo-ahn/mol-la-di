@@ -1,14 +1,13 @@
 """Latent diffusion model for molecule generation.
 
-Supports two encoder/decoder architectures:
-- VAE (legacy): MoleculeVAE with encoder-decoder
-- RAE: Frozen MAE encoder + trainable RAE decoder with noise augmentation
+Uses RAE (Representation Autoencoder) architecture:
+- Frozen MAE encoder + trainable RAE decoder with noise augmentation
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple
 
 from src.models.diffusion.noise_scheduler import DDPMScheduler
 from src.models.diffusion.dit_block import DiTBlock, TimestepEmbedding
@@ -17,7 +16,7 @@ from src.models.diffusion.dit_block import DiTBlock, TimestepEmbedding
 class LatentDiffusionModel(nn.Module):
     """Latent diffusion model using DiT architecture.
 
-    Operates on node-wise latent representations from VAE.
+    Operates on node-wise latent representations from the encoder.
     """
 
     def __init__(

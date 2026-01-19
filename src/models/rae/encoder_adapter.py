@@ -6,7 +6,6 @@ The MAE encoder is frozen, while the projection layer is trainable.
 
 import torch
 import torch.nn as nn
-from typing import Optional
 
 from src.models.mae import MoleculeMAE
 from src.models.mae.encoder import MAEEncoder
