@@ -1,0 +1,53 @@
+# ZINC250k Diffusion Full Training Config
+
+output_dir: "data/runs/zinc250k_diffusion"
+
+seed: 42
+
+data:
+  root: "data/datasets"
+  dataset: "zinc250k"
+  max_atoms: 38
+  num_workers: 4
+
+# VAE checkpoint to use
+vae:
+  checkpoint: "data/runs/zinc250k_vae/checkpoints/best.pt"
+
+model:
+  num_atom_types: 10
+  num_bond_types: 5
+  d_latent: 64
+
+diffusion:
+  d_model: 256
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 1024
+  dropout: 0.0
+  num_timesteps: 1000
+  beta_schedule: "cosine"
+  inference_steps: 100
+
+training:
+  epochs: 500
+  batch_size: 128
+  eval_batch_size: 256
+  lr: 1.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  warmup_epochs: 10
+  use_scheduler: true
+  save_every: 50
+  eval_every: 50
+
+eval:
+  n_samples: 1000
+  final_n_samples: 10000
+  temperature: 1.0
+
+wandb:
+  enabled: true
+  project: "molecule-diffusion"
+  name: "zinc250k_diffusion"

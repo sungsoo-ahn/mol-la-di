@@ -1,0 +1,57 @@
+# QM9 Diffusion Debug Config
+# Fast training for testing
+
+output_dir: "data/runs/qm9_diffusion_debug"
+
+seed: 42
+
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  max_atoms: 9
+  num_workers: 0
+  debug: true
+  debug_samples: 128
+
+# VAE checkpoint to use
+vae:
+  checkpoint: "data/runs/qm9_vae_debug/checkpoints/best.pt"
+
+model:
+  # These will be loaded from VAE checkpoint
+  num_atom_types: 5
+  num_bond_types: 5
+  d_latent: 32
+
+diffusion:
+  d_model: 128
+  nhead: 4
+  num_layers: 4
+  dim_feedforward: 512
+  dropout: 0.0
+  num_timesteps: 1000
+  beta_schedule: "cosine"
+  inference_steps: 50
+
+training:
+  epochs: 20
+  batch_size: 32
+  eval_batch_size: 64
+  lr: 1.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  warmup_epochs: 2
+  use_scheduler: true
+  save_every: 10
+  eval_every: 10
+
+eval:
+  n_samples: 100
+  final_n_samples: 100
+  temperature: 1.0
+
+wandb:
+  enabled: false
+  project: "molecule-diffusion"
+  name: "qm9_diffusion_debug"
