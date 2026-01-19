@@ -1,18 +1,26 @@
-"""One-shot decoder for molecular VAE."""
+"""RAE-style decoder with noise-robust reconstruction.
 
-import math
+Following the RAE (Representation Autoencoder) approach:
+- Deeper architecture than standard VAE decoder
+- Wider FFN following DDT head design
+- Pairwise bilinear edge prediction
+- Designed to be robust to noisy latent inputs from diffusion
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
 
 
-class OneShotDecoder(nn.Module):
-    """One-shot decoder for molecular VAE.
+class RAEDecoder(nn.Module):
+    """RAE-style decoder with noise-robust reconstruction.
 
-    Decodes latent representations to molecules in parallel.
-    - Node head: predicts atom types for each position
-    - Edge head: predicts bond types for each pair using pairwise MLP
+    Improvements over standard OneShotDecoder:
+    1. Deeper architecture (6 vs 4 layers)
+    2. Wider FFN (2048-dim following DDT head design)
+    3. Pairwise bilinear edge prediction (more expressive than concatenation)
+    4. No dropout (following diffusion conventions)
     """
 
     def __init__(
@@ -20,13 +28,26 @@ class OneShotDecoder(nn.Module):
         num_atom_types: int,
         num_bond_types: int,
         d_latent: int,
-        d_model: int,
-        nhead: int,
-        num_layers: int,
+        d_model: int = 512,
+        nhead: int = 8,
+        num_layers: int = 6,
         dim_feedforward: int = 2048,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
         max_atoms: int = 9,
     ):
+        """Initialize RAE decoder.
+
+        Args:
+            num_atom_types: Number of atom type classes
+            num_bond_types: Number of bond type classes
+            d_latent: Input latent dimension
+            d_model: Model dimension (wider than typical VAE decoder)
+            nhead: Number of attention heads
+            num_layers: Number of transformer layers (deeper than typical VAE decoder)
+            dim_feedforward: Feedforward dimension (DDT-style wide)
+            dropout: Dropout probability (0.0 following diffusion conventions)
+            max_atoms: Maximum number of atoms
+        """
         super().__init__()
 
         self.num_atom_types = num_atom_types
@@ -42,6 +63,7 @@ class OneShotDecoder(nn.Module):
         self.pos_embedding = nn.Embedding(max_atoms, d_model)
 
         # Transformer decoder layers (self-attention only, no cross-attention)
+        # Using pre-norm (norm_first=True) for better training stability
         decoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -55,29 +77,46 @@ class OneShotDecoder(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
 
-        # Node head: predicts atom types
+        # Node head: 2-layer MLP -> num_atom_types
         self.node_head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.Linear(d_model, num_atom_types),
         )
 
-        # Edge head: pairwise MLP for bond prediction
-        # Takes concatenated pair representations
+        # Edge head: Bilinear approach for more expressive pairwise prediction
+        # Query and Key projections for bilinear attention
+        self.edge_query = nn.Linear(d_model, d_model)
+        self.edge_key = nn.Linear(d_model, d_model)
+
+        # MLP to combine bilinear features for bond type prediction
         self.edge_mlp = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
+            nn.Linear(d_model, d_model),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, d_model // 2),
-            nn.GELU(),
-            nn.Linear(d_model // 2, num_bond_types),
+            nn.Linear(d_model, num_bond_types),
         )
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights."""
+        # Initialize projection layers
+        nn.init.xavier_uniform_(self.input_proj.weight)
+        nn.init.zeros_(self.input_proj.bias)
+
+        # Initialize edge projections
+        nn.init.xavier_uniform_(self.edge_query.weight)
+        nn.init.zeros_(self.edge_query.bias)
+        nn.init.xavier_uniform_(self.edge_key.weight)
+        nn.init.zeros_(self.edge_key.bias)
 
     def forward(
         self,
         z: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
+        """Forward pass through decoder.
+
         Args:
             z: Latent representation (B, N, d_latent)
 
@@ -102,12 +141,18 @@ class OneShotDecoder(nn.Module):
         # Node predictions
         node_logits = self.node_head(x)  # (B, N, num_atom_types)
 
-        # Edge predictions via pairwise MLP
-        # Create all pairs of node representations
-        x_i = x.unsqueeze(2).expand(-1, -1, N, -1)  # (B, N, N, d_model)
-        x_j = x.unsqueeze(1).expand(-1, N, -1, -1)  # (B, N, N, d_model)
-        pair_features = torch.cat([x_i, x_j], dim=-1)  # (B, N, N, 2*d_model)
+        # Edge predictions via bilinear approach
+        # Q(x_i) * K(x_j) -> more expressive than concatenation
+        q = self.edge_query(x)  # (B, N, d_model)
+        k = self.edge_key(x)    # (B, N, d_model)
 
+        # Compute pairwise bilinear features
+        # For each pair (i, j), compute element-wise product of Q_i and K_j
+        q_expanded = q.unsqueeze(2)  # (B, N, 1, d_model)
+        k_expanded = k.unsqueeze(1)  # (B, 1, N, d_model)
+        pair_features = q_expanded * k_expanded  # (B, N, N, d_model)
+
+        # Predict bond types
         edge_logits = self.edge_mlp(pair_features)  # (B, N, N, num_bond_types)
 
         return node_logits, edge_logits

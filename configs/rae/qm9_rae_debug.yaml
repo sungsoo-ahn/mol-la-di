@@ -1,0 +1,66 @@
+# QM9 RAE Decoder Debug Config
+# Small dataset and model for rapid iteration
+# Requires pretrained MAE checkpoint
+
+output_dir: "data/runs/qm9_rae_debug"
+seed: 42
+
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  debug: true
+  debug_samples: 128
+  num_workers: 0
+
+# Frozen MAE encoder
+encoder:
+  type: "mae"
+  checkpoint: "data/runs/qm9_mae/checkpoints/best.pt"
+  d_latent: 64  # Projection dimension for adapter
+
+# Model dimensions (will be filled from data/encoder)
+model:
+  # These are filled dynamically from dataset
+  # num_atom_types: filled from dataset
+  # num_bond_types: filled from dataset
+
+# RAE decoder architecture (smaller for debug)
+rae_decoder:
+  d_model: 256
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 1024
+  dropout: 0.0
+
+# Noise augmentation for diffusion robustness
+noise_augmentation:
+  enabled: true
+  sigma_min: 0.0
+  sigma_max: 1.0
+  curriculum: true
+  warmup_epochs: 10
+  rampup_epochs: 20
+
+# Loss weights
+loss:
+  lambda_node: 1.0
+  lambda_edge: 1.0
+  label_smoothing: 0.1
+  focal_gamma: 2.0
+  use_edge_class_weights: true
+
+training:
+  epochs: 50
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  warmup_epochs: 5
+  use_scheduler: true
+  min_lr: 1.0e-6
+  save_every: 20
+  eval_every: 10
+
+wandb:
+  enabled: false
+  project: "molecule-rae"

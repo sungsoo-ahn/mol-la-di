@@ -1,4 +1,9 @@
-"""Sampling script for latent diffusion molecule generation."""
+"""Sampling script for latent diffusion molecule generation.
+
+Uses RAE (Representation Autoencoder) architecture:
+- Frozen MAE encoder + trainable RAE decoder
+- Diffusion model operates on latent representations
+"""
 
 import sys
 import json
@@ -14,9 +19,10 @@ from rdkit.Chem import Draw
 
 from src.utils import load_config, setup_output_dir, set_seed, get_device
 from src.data.molecule_dataset import get_dataloader
-from src.models.vae import MoleculeVAE
 from src.models.diffusion import LatentDiffusionModel
-from src.models.diffusion.latent_diffusion import LatentDiffusionWithVAE
+from src.models.diffusion.latent_diffusion import LatentDiffusionWithRAE
+from src.models.rae import RAEDecoder
+from src.models.rae.encoder_adapter import load_mae_encoder_adapter
 from src.evaluation import MoleculeEvaluator, adj_to_mol, mol_to_smiles
 
 
@@ -41,34 +47,6 @@ def setup_logging(output_dir: Path) -> logging.Logger:
     logger.addHandler(ch)
 
     return logger
-
-
-def load_vae(vae_checkpoint: str, device: torch.device) -> MoleculeVAE:
-    """Load pretrained VAE from checkpoint."""
-    checkpoint = torch.load(vae_checkpoint, map_location='cpu', weights_only=False)
-
-    config = checkpoint['config']
-    model_config = config['model']
-    data_config = config['data']
-
-    vae = MoleculeVAE(
-        num_atom_types=model_config['num_atom_types'],
-        num_bond_types=model_config['num_bond_types'],
-        d_model=model_config.get('d_model', 256),
-        d_latent=model_config.get('d_latent', 64),
-        nhead=model_config.get('nhead', 8),
-        encoder_layers=model_config.get('encoder_layers', 4),
-        decoder_layers=model_config.get('decoder_layers', 4),
-        dim_feedforward=model_config.get('dim_feedforward', 1024),
-        dropout=model_config.get('dropout', 0.1),
-        max_atoms=data_config['max_atoms'],
-    )
-
-    vae.load_state_dict(checkpoint['model_state_dict'])
-    vae = vae.to(device)
-    vae.eval()
-
-    return vae
 
 
 def load_diffusion(diffusion_checkpoint: str, config: dict, device: torch.device) -> LatentDiffusionModel:
@@ -101,9 +79,49 @@ def load_diffusion(diffusion_checkpoint: str, config: dict, device: torch.device
     return diffusion
 
 
+def load_rae_decoder(rae_checkpoint: str, config: dict, device: torch.device) -> RAEDecoder:
+    """Load pretrained RAE decoder from checkpoint."""
+    checkpoint = torch.load(rae_checkpoint, map_location='cpu', weights_only=False)
+
+    # Use config from checkpoint if available
+    ckpt_config = checkpoint.get('config', config)
+
+    model_config = ckpt_config.get('model', {})
+    data_config = ckpt_config.get('data', {})
+    decoder_config = ckpt_config.get('rae_decoder', {})
+
+    rae_decoder = RAEDecoder(
+        num_atom_types=model_config['num_atom_types'],
+        num_bond_types=model_config['num_bond_types'],
+        d_latent=ckpt_config.get('encoder', {}).get('d_latent', 64),
+        d_model=decoder_config.get('d_model', 512),
+        nhead=decoder_config.get('nhead', 8),
+        num_layers=decoder_config.get('num_layers', 6),
+        dim_feedforward=decoder_config.get('dim_feedforward', 2048),
+        dropout=decoder_config.get('dropout', 0.0),
+        max_atoms=data_config['max_atoms'],
+    )
+
+    # Load decoder weights
+    if 'decoder_state_dict' in checkpoint:
+        rae_decoder.load_state_dict(checkpoint['decoder_state_dict'])
+    elif 'model_state_dict' in checkpoint:
+        # Try to extract decoder from full model state dict
+        decoder_state = {k.replace('decoder.', ''): v
+                        for k, v in checkpoint['model_state_dict'].items()
+                        if k.startswith('decoder.')}
+        if decoder_state:
+            rae_decoder.load_state_dict(decoder_state)
+
+    rae_decoder = rae_decoder.to(device)
+    rae_decoder.eval()
+
+    return rae_decoder
+
+
 @torch.no_grad()
 def sample_molecules(
-    combined_model: LatentDiffusionWithVAE,
+    combined_model: LatentDiffusionWithRAE,
     n_samples: int,
     device: torch.device,
     num_inference_steps: int = 100,
@@ -170,17 +188,32 @@ def main(config_path: str):
     logger.info(f"Device: {device}")
 
     # Load models
-    vae_checkpoint = config['vae']['checkpoint']
-    diffusion_checkpoint = config['diffusion']['checkpoint']
+    encoder_config = config.get('encoder', {})
+    rae_decoder_config = config.get('rae_decoder', {})
+    diffusion_config = config.get('diffusion', {})
 
-    logger.info(f"Loading VAE from: {vae_checkpoint}")
-    vae = load_vae(vae_checkpoint, device)
+    mae_checkpoint = encoder_config.get('checkpoint')
+    rae_checkpoint = rae_decoder_config.get('checkpoint')
+    diffusion_checkpoint = diffusion_config.get('checkpoint')
+
+    if not mae_checkpoint or not rae_checkpoint or not diffusion_checkpoint:
+        raise ValueError(
+            "Config must specify encoder.checkpoint, rae_decoder.checkpoint, "
+            "and diffusion.checkpoint"
+        )
+
+    logger.info(f"Loading MAE encoder from: {mae_checkpoint}")
+    d_latent = encoder_config.get('d_latent', 64)
+    encoder_adapter = load_mae_encoder_adapter(mae_checkpoint, d_latent, device)
+
+    logger.info(f"Loading RAE decoder from: {rae_checkpoint}")
+    rae_decoder = load_rae_decoder(rae_checkpoint, config, device)
 
     logger.info(f"Loading diffusion model from: {diffusion_checkpoint}")
     diffusion = load_diffusion(diffusion_checkpoint, config, device)
 
     # Combined model
-    combined_model = LatentDiffusionWithVAE(vae, diffusion)
+    combined_model = LatentDiffusionWithRAE(encoder_adapter, rae_decoder, diffusion)
 
     # Load training data for evaluation
     logger.info("Loading training data for evaluation...")

@@ -1,9 +1,14 @@
-"""Latent diffusion model for molecule generation."""
+"""Latent diffusion model for molecule generation.
+
+Supports two encoder/decoder architectures:
+- VAE (legacy): MoleculeVAE with encoder-decoder
+- RAE: Frozen MAE encoder + trainable RAE decoder with noise augmentation
+"""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 from src.models.diffusion.noise_scheduler import DDPMScheduler
 from src.models.diffusion.dit_block import DiTBlock, TimestepEmbedding
@@ -196,16 +201,28 @@ class LatentDiffusionModel(nn.Module):
         return z_t
 
 
-class LatentDiffusionWithVAE(nn.Module):
-    """Combined model for end-to-end sampling."""
+class LatentDiffusionWithRAE(nn.Module):
+    """Combined model for end-to-end sampling with RAE decoder.
+
+    Uses frozen MAE encoder + RAE decoder + diffusion model.
+    """
 
     def __init__(
         self,
-        vae: nn.Module,
+        encoder_adapter: nn.Module,
+        rae_decoder: nn.Module,
         diffusion: LatentDiffusionModel,
     ):
+        """Initialize combined model.
+
+        Args:
+            encoder_adapter: MAE encoder adapter (for encoding training data)
+            rae_decoder: RAE decoder (for decoding sampled latents)
+            diffusion: Latent diffusion model
+        """
         super().__init__()
-        self.vae = vae
+        self.encoder_adapter = encoder_adapter
+        self.rae_decoder = rae_decoder
         self.diffusion = diffusion
 
     @torch.no_grad()
@@ -237,8 +254,8 @@ class LatentDiffusionWithVAE(nn.Module):
             num_inference_steps=num_inference_steps,
         )
 
-        # Decode to molecules
-        node_types, adj_matrix = self.vae.decoder.decode(z, temperature=temperature, hard=True)
+        # Decode to molecules using RAE decoder
+        node_types, adj_matrix = self.rae_decoder.decode(z, temperature=temperature, hard=True)
 
         return node_types, adj_matrix
 
@@ -256,7 +273,7 @@ class LatentDiffusionWithVAE(nn.Module):
         Returns:
             all_latents: (N, max_atoms, d_latent)
         """
-        self.vae.eval()
+        self.encoder_adapter.eval()
         all_latents = []
 
         with torch.no_grad():
@@ -264,8 +281,8 @@ class LatentDiffusionWithVAE(nn.Module):
                 node_features = batch['node_features'].to(device)
                 adj_matrix = batch['adj_matrix'].to(device)
 
-                # Encode to latents (use mean, not sampled)
-                z = self.vae.get_latent(node_features, adj_matrix, sample=False)
+                # Encode to latents using MAE encoder adapter
+                z = self.encoder_adapter.encode(node_features, adj_matrix)
                 all_latents.append(z.cpu())
 
         return torch.cat(all_latents, dim=0)
