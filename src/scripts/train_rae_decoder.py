@@ -372,6 +372,8 @@ def main(config_path: str):
 
     # Update config with dataset-specific values
     config['data']['max_atoms'] = train_dataset.max_atoms
+    if config.get('model') is None:
+        config['model'] = {}
     config['model']['num_atom_types'] = train_dataset.num_atom_types
     config['model']['num_bond_types'] = train_dataset.num_bond_types
 
