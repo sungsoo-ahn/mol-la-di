@@ -132,6 +132,7 @@ class MoleculeVAE(nn.Module):
         adj_matrix: torch.Tensor,
         beta: float = 1.0,
         edge_weight: float = 1.0,
+        symmetric_edge_loss: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Compute VAE loss.
 
@@ -140,6 +141,7 @@ class MoleculeVAE(nn.Module):
             adj_matrix: Bond types (B, N, N)
             beta: KL divergence weight (for beta-VAE)
             edge_weight: Weight for edge reconstruction loss
+            symmetric_edge_loss: If True, only compute edge loss on upper triangle
 
         Returns:
             Dictionary with total_loss, node_loss, edge_loss, kl_loss
@@ -161,10 +163,23 @@ class MoleculeVAE(nn.Module):
 
         # Edge reconstruction loss (cross-entropy)
         # adj_matrix contains bond types as targets
-        edge_loss = F.cross_entropy(
-            edge_logits.view(-1, self.num_bond_types),
-            adj_matrix.view(-1),
-        )
+        if symmetric_edge_loss:
+            # Only compute loss on upper triangle (no diagonal, no redundant lower triangle)
+            B, N, _ = adj_matrix.shape
+            # Create upper triangle mask (exclude diagonal)
+            triu_mask = torch.triu(torch.ones(N, N, device=adj_matrix.device), diagonal=1).bool()
+            # Apply mask: (B, N, N) -> (B, num_upper_edges)
+            edge_logits_masked = edge_logits[:, triu_mask, :]  # (B, N*(N-1)/2, num_bond_types)
+            adj_targets_masked = adj_matrix[:, triu_mask]  # (B, N*(N-1)/2)
+            edge_loss = F.cross_entropy(
+                edge_logits_masked.reshape(-1, self.num_bond_types),
+                adj_targets_masked.reshape(-1),
+            )
+        else:
+            edge_loss = F.cross_entropy(
+                edge_logits.view(-1, self.num_bond_types),
+                adj_matrix.view(-1),
+            )
 
         # KL divergence loss
         # KL(q(z|x) || p(z)) where p(z) = N(0, I)

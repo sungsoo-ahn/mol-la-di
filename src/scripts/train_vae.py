@@ -73,8 +73,19 @@ def build_vae(config: dict) -> MoleculeVAE:
     )
 
 
-def get_beta(epoch: int, warmup_epochs: int) -> float:
-    """Get KL divergence weight with warmup."""
+def get_beta(epoch: int, warmup_epochs: int, fixed_beta: float = None) -> float:
+    """Get KL divergence weight with warmup.
+
+    Args:
+        epoch: Current epoch number
+        warmup_epochs: Number of epochs for beta warmup
+        fixed_beta: If provided, use this fixed value instead of warmup
+
+    Returns:
+        Beta value for KL divergence weight
+    """
+    if fixed_beta is not None:
+        return fixed_beta
     if warmup_epochs <= 0:
         return 1.0
     return min(1.0, epoch / warmup_epochs)
@@ -91,6 +102,7 @@ def train_epoch(
     max_grad_norm: float = 1.0,
     warmup_epochs: int = 0,
     base_lr: float = 1e-3,
+    symmetric_edge_loss: bool = False,
 ) -> dict:
     """Train for one epoch."""
     model.train()
@@ -113,6 +125,7 @@ def train_epoch(
         loss_dict = model.compute_loss(
             node_features, adj_matrix,
             beta=beta, edge_weight=edge_weight,
+            symmetric_edge_loss=symmetric_edge_loss,
         )
         loss = loss_dict['total_loss']
         loss.backward()
@@ -142,6 +155,7 @@ def validate(
     device: torch.device,
     beta: float,
     edge_weight: float = 1.0,
+    symmetric_edge_loss: bool = False,
 ) -> dict:
     """Validate the model."""
     model.eval()
@@ -156,6 +170,7 @@ def validate(
         loss_dict = model.compute_loss(
             node_features, adj_matrix,
             beta=beta, edge_weight=edge_weight,
+            symmetric_edge_loss=symmetric_edge_loss,
         )
 
         for key in totals:
@@ -286,6 +301,60 @@ def save_checkpoint(
     }, path)
 
 
+def log_ablation(
+    config: dict,
+    train_metrics: dict,
+    val_metrics: dict,
+    wandb_url: str = None,
+    notes: str = "",
+):
+    """Log experiment results to ablation log file.
+
+    Args:
+        config: Training config dictionary
+        train_metrics: Final training metrics (including accuracy)
+        val_metrics: Final validation metrics (including accuracy)
+        wandb_url: W&B run URL if available
+        notes: Optional notes about this run
+    """
+    ablation_file = Path("data/runs/ablation_log.json")
+    ablation_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing log or create new one
+    if ablation_file.exists():
+        with open(ablation_file, 'r') as f:
+            ablation_log = json.load(f)
+    else:
+        ablation_log = []
+
+    # Create entry
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "config_name": config.get('output_dir', 'unknown').split('/')[-1],
+        "d_latent": config.get('model', {}).get('d_latent', None),
+        "d_model": config.get('model', {}).get('d_model', None),
+        "beta": config.get('training', {}).get('beta', None),
+        "symmetric_edge_loss": config.get('training', {}).get('symmetric_edge_loss', False),
+        "dataset_size": config.get('data', {}).get('debug_samples', 'full'),
+        "epochs": config.get('training', {}).get('epochs', None),
+        "train_node_acc": train_metrics.get('node_accuracy', None),
+        "train_edge_acc": train_metrics.get('edge_accuracy', None),
+        "val_node_acc": val_metrics.get('node_accuracy', None),
+        "val_edge_acc": val_metrics.get('edge_accuracy', None),
+        "train_loss": train_metrics.get('total_loss', None),
+        "val_loss": val_metrics.get('total_loss', None),
+        "wandb_run": wandb_url,
+        "notes": notes,
+    }
+
+    ablation_log.append(entry)
+
+    with open(ablation_file, 'w') as f:
+        json.dump(ablation_log, f, indent=2)
+
+    return entry
+
+
 def load_checkpoint(
     path: Path,
     model: torch.nn.Module,
@@ -378,6 +447,7 @@ def main(config_path: str):
 
     # Training loop
     best_val_loss = float('inf')
+    best_train_acc = 0.0
     results_history = []
 
     # Get training hyperparameters
@@ -386,10 +456,22 @@ def main(config_path: str):
     warmup_epochs = train_config.get('warmup_epochs', 0)
     beta_warmup_epochs = train_config.get('beta_warmup_epochs', 50)
     base_lr = train_config.get('lr', 3e-4)
+    fixed_beta = train_config.get('beta', None)  # Override beta if specified
+    track_train_accuracy = train_config.get('track_train_accuracy', True)
+    symmetric_edge_loss = train_config.get('symmetric_edge_loss', False)
+
+    if fixed_beta is not None:
+        logger.info(f"Using fixed beta={fixed_beta} (no warmup)")
+    if symmetric_edge_loss:
+        logger.info("Using symmetric edge loss (upper triangle only)")
+
+    # Track best accuracies for checkpoint selection
+    latest_train_recon = {}
+    latest_val_recon = {}
 
     for epoch in range(1, train_config['epochs'] + 1):
-        # Compute beta with warmup
-        beta = get_beta(epoch, beta_warmup_epochs)
+        # Compute beta with warmup (or use fixed value)
+        beta = get_beta(epoch, beta_warmup_epochs, fixed_beta)
 
         # Train
         train_metrics = train_epoch(
@@ -398,12 +480,40 @@ def main(config_path: str):
             max_grad_norm=max_grad_norm,
             warmup_epochs=warmup_epochs,
             base_lr=base_lr,
+            symmetric_edge_loss=symmetric_edge_loss,
         )
         logger.info(f"Epoch {epoch} - Train: {train_metrics}")
 
         # Validate
-        val_metrics = validate(model, val_loader, device, beta=beta, edge_weight=edge_weight)
+        val_metrics = validate(model, val_loader, device, beta=beta, edge_weight=edge_weight, symmetric_edge_loss=symmetric_edge_loss)
         logger.info(f"Epoch {epoch} - Val: {val_metrics}")
+
+        # Track training accuracy (every epoch for ablation study)
+        if track_train_accuracy:
+            train_recon = evaluate_reconstruction(
+                model, train_loader, device,
+                n_samples=len(train_loader.dataset)  # Evaluate on full training set
+            )
+            val_recon = evaluate_reconstruction(
+                model, val_loader, device,
+                n_samples=len(val_loader.dataset)
+            )
+            latest_train_recon = train_recon
+            latest_val_recon = val_recon
+            logger.info(f"Epoch {epoch} - Train Acc: node={train_recon['node_accuracy']:.4f}, edge={train_recon['edge_accuracy']:.4f}")
+            logger.info(f"Epoch {epoch} - Val Acc: node={val_recon['node_accuracy']:.4f}, edge={val_recon['edge_accuracy']:.4f}")
+
+            # Track best training accuracy for checkpoint
+            train_acc_combined = (train_recon['node_accuracy'] + train_recon['edge_accuracy']) / 2
+            if train_acc_combined > best_train_acc:
+                best_train_acc = train_acc_combined
+                save_checkpoint(
+                    model, optimizer, scheduler, epoch,
+                    {'train': train_metrics, 'val': val_metrics, 'train_recon': train_recon, 'val_recon': val_recon},
+                    config,
+                    output_dir / 'checkpoints' / 'best_accuracy.pt'
+                )
+                logger.info(f"Saved best accuracy checkpoint (train_acc={train_acc_combined:.4f})")
 
         # Update scheduler
         current_lr = optimizer.param_groups[0]['lr']
@@ -417,6 +527,9 @@ def main(config_path: str):
             wandb_metrics = {'epoch': epoch, 'lr': current_lr, 'beta': beta}
             wandb_metrics.update(_filter_wandb_metrics(train_metrics, 'train'))
             wandb_metrics.update(_filter_wandb_metrics(val_metrics, 'val'))
+            if track_train_accuracy:
+                wandb_metrics.update(_filter_wandb_metrics(latest_train_recon, 'train_recon'))
+                wandb_metrics.update(_filter_wandb_metrics(latest_val_recon, 'val_recon'))
             wandb.log(wandb_metrics)
 
         # Save checkpoint
@@ -494,7 +607,9 @@ def main(config_path: str):
     logger.info(f"Final metrics: {final_metrics}")
 
     # Log final metrics and molecules to W&B
+    wandb_url = None
     if use_wandb:
+        wandb_url = wandb.run.url  # Save URL before finish()
         final_wandb_log = _filter_wandb_metrics(final_recon_metrics, 'final/recon')
         final_wandb_log.update(_filter_wandb_metrics(final_metrics, 'final'))
 
@@ -513,6 +628,24 @@ def main(config_path: str):
     final_metrics.update(final_recon_metrics)
     with open(output_dir / 'results' / 'final_metrics.json', 'w') as f:
         json.dump(final_metrics, f, indent=2)
+
+    # Log to ablation file
+    # Get final train reconstruction metrics for ablation log
+    final_train_recon = evaluate_reconstruction(
+        model, train_loader, device,
+        n_samples=len(train_loader.dataset)
+    )
+    train_metrics_with_acc = {**train_metrics, **final_train_recon}
+    val_metrics_with_acc = {**val_metrics, **final_recon_metrics}
+
+    ablation_entry = log_ablation(
+        config=config,
+        train_metrics=train_metrics_with_acc,
+        val_metrics=val_metrics_with_acc,
+        wandb_url=wandb_url,
+        notes=f"epochs={train_config['epochs']}, beta={fixed_beta if fixed_beta is not None else 'warmup'}",
+    )
+    logger.info(f"Logged to ablation file: {ablation_entry}")
 
     logger.info("Training complete!")
 

@@ -1,0 +1,52 @@
+# QM9 VAE Tiny Config - Symmetric Edge Loss
+# Testing if symmetric loss improves edge accuracy
+
+output_dir: "data/runs/qm9_vae_tiny_sym"
+
+seed: 42
+
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  max_atoms: 9
+  num_workers: 0
+  debug: true
+  debug_samples: 32  # Very small for fast iteration
+
+model:
+  num_atom_types: 5  # X, C, N, O, F
+  num_bond_types: 5  # none, single, double, triple, aromatic
+  d_model: 256
+  d_latent: 128  # Best from previous sweep
+  nhead: 8
+  encoder_layers: 4
+  decoder_layers: 4
+  dim_feedforward: 1024
+  dropout: 0.1
+
+training:
+  epochs: 100
+  batch_size: 32
+  eval_batch_size: 64
+  lr: 3.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_epochs: 5
+  beta: 0.0  # Pure autoencoder (no KL loss)
+  edge_weight: 1.0
+  use_scheduler: true
+  save_every: 20
+  eval_every: 20
+  track_train_accuracy: true
+  symmetric_edge_loss: true  # NEW: Only compute loss on upper triangle
+
+eval:
+  n_samples: 100
+  final_n_samples: 100
+  temperature: 1.0
+
+wandb:
+  enabled: true
+  project: "molecule-vae"
+  name: "tiny_d128_sym"
