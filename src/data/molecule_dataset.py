@@ -2,7 +2,7 @@
 
 import pickle
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional
 
 import numpy as np
 import torch
@@ -27,15 +27,8 @@ TOKEN_TO_ATOM = {
     '[P]': 'P', '[PH]': 'P',
 }
 
-# Bond type mappings (0: no bond, 1: single, 2: double, 3: triple, 4: aromatic)
-BOND_TYPES = {
-    'single': 1,
-    'double': 2,
-    'triple': 3,
-    'aromatic': 4,
-}
-
 # GEEL edge label to bond type mapping
+# Bond types: 0=no bond, 1=single, 2=double, 3=triple, 4=aromatic
 # GEEL uses: 5=single, 6=double, 7=triple, 8=aromatic
 # We use: 1=single, 2=double, 3=triple, 4=aromatic
 GEEL_EDGE_TO_BOND = {5: 1, 6: 2, 7: 3, 8: 4}
@@ -162,7 +155,7 @@ class MoleculeDataset(Dataset):
 
         self._process_networkx_graphs(graphs, smiles_list)
 
-    def _process_networkx_graphs(self, graphs: List, smiles_list: List[str]):
+    def _process_networkx_graphs(self, graphs: list, smiles_list: list[str]):
         """Convert NetworkX graphs to adjacency matrix format."""
         self.node_features = []
         self.adj_matrices = []
@@ -194,7 +187,7 @@ class MoleculeDataset(Dataset):
         self.adj_matrices = np.array(self.adj_matrices)
         self.num_atoms = np.array(self.num_atoms)
 
-    def _process_networkx_molecule(self, g) -> Optional[Tuple[List[int], int, np.ndarray]]:
+    def _process_networkx_molecule(self, g) -> Optional[tuple[list[int], int, np.ndarray]]:
         """Process a single NetworkX graph molecule."""
         num_nodes = g.number_of_nodes()
         if num_nodes > self.max_atoms or num_nodes == 0:
