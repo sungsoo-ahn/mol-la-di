@@ -1,0 +1,46 @@
+# QM9 MAE Debug Config
+# Small dataset and model for rapid iteration
+
+output_dir: "data/runs/qm9_mae_debug"
+seed: 42
+
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  debug: true
+  debug_samples: 128
+  num_workers: 0
+
+model:
+  d_model: 128
+  d_decoder: 64
+  nhead: 4
+  encoder_layers: 2
+  decoder_layers: 1
+  dim_feedforward: 512
+  dropout: 0.1
+
+masking:
+  node_mask_ratio: 0.15
+  edge_mask_ratio: 0.50
+
+training:
+  epochs: 50
+  batch_size: 32
+  lr: 3.0e-4
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_epochs: 5
+  use_scheduler: true
+  min_lr: 1.0e-6
+  use_edge_class_weights: true
+  save_every: 20
+  eval_every: 10
+
+generation:
+  num_iterations: 10
+  temperature: 1.0
+
+wandb:
+  enabled: false
+  project: "molecule-mae"
