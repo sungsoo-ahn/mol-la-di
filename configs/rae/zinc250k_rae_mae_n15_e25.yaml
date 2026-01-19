@@ -1,0 +1,51 @@
+# RAE Decoder for ZINC250k MAE with node_mask=15%, edge_mask=25%
+output_dir: "data/runs/zinc250k_rae_mae_n15_e25"
+seed: 42
+
+data:
+  root: "data/datasets"
+  dataset: "zinc250k"
+  max_atoms: 38
+  num_workers: 4
+
+encoder:
+  checkpoint: "data/runs/zinc250k_mae_mask_n15_e25/checkpoints/best.pt"
+  d_latent: 64
+
+rae_decoder:
+  d_model: 512
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.0
+
+noise_augmentation:
+  enabled: true
+  sigma_min: 0.0
+  sigma_max: 1.0
+  curriculum: true
+  warmup_epochs: 50
+  rampup_epochs: 100
+
+loss:
+  lambda_node: 1.0
+  lambda_edge: 1.0
+  label_smoothing: 0.1
+  focal_gamma: 2.0
+  use_edge_class_weights: true
+
+training:
+  epochs: 200
+  batch_size: 64
+  lr: 1.0e-4
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  warmup_epochs: 10
+  use_scheduler: true
+  min_lr: 1.0e-6
+  save_every: 50
+  eval_every: 50
+
+wandb:
+  enabled: true
+  project: "molecule-rae"

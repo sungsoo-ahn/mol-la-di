@@ -1,0 +1,53 @@
+# QM9 RAE Latent Diffusion - node_mask=15%, edge_mask=75%
+
+output_dir: "data/runs/qm9_rae_diffusion_n15_e75"
+seed: 42
+
+data:
+  root: "data/datasets"
+  dataset: "qm9"
+  debug: false
+  num_workers: 4
+
+# RAE mode: encoder adapter + RAE decoder
+encoder:
+  checkpoint: "data/runs/qm9_mae_mask_n15_e75/checkpoints/best.pt"
+  d_latent: 64
+
+rae_decoder:
+  checkpoint: "data/runs/qm9_rae_mae_n15_e75/checkpoints/best.pt"
+
+model:
+  d_latent: 64  # Matches encoder.d_latent
+
+diffusion:
+  d_model: 256
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 1024
+  dropout: 0.0
+  num_timesteps: 1000
+  beta_schedule: "cosine"
+  inference_steps: 100
+
+training:
+  epochs: 1000
+  batch_size: 128
+  lr: 1.0e-4
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  warmup_epochs: 10
+  use_scheduler: true
+  min_lr: 1.0e-6
+  save_every: 50
+  eval_every: 50
+
+eval:
+  n_samples: 1000
+  final_n_samples: 10000
+  temperature: 1.0
+
+wandb:
+  enabled: true
+  project: "molecule-rae-diffusion"
+  name: "qm9_rae_diffusion_n15_e75"

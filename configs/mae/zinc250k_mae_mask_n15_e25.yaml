@@ -1,0 +1,46 @@
+# ZINC250k MAE - node_mask=0.15, edge_mask=0.25 (less edge masking)
+
+output_dir: "data/runs/zinc250k_mae_mask_n15_e25"
+seed: 42
+
+data:
+  root: "data/datasets"
+  dataset: "zinc250k"
+  max_atoms: 38
+  debug: false
+  num_workers: 4
+
+model:
+  d_model: 256
+  d_decoder: 128
+  nhead: 8
+  encoder_layers: 6
+  decoder_layers: 2
+  dim_feedforward: 1024
+  dropout: 0.1
+
+masking:
+  node_mask_ratio: 0.15
+  edge_mask_ratio: 0.25
+
+training:
+  epochs: 500
+  batch_size: 64
+  lr: 3.0e-4
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_epochs: 10
+  use_scheduler: true
+  min_lr: 1.0e-6
+  use_edge_class_weights: true
+  save_every: 20
+  eval_every: 20
+
+generation:
+  num_iterations: 10
+  temperature: 1.0
+
+wandb:
+  enabled: true
+  project: "molecule-mae"
+  name: "zinc250k_mae_n15_e25"
