@@ -7,19 +7,24 @@ from typing import Optional, List, Tuple
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from torch_geometric.datasets import QM9, ZINC
-from torch_geometric.data import Data
-from rdkit import Chem
 from tqdm import tqdm
 
-# Atomic number to symbol mapping
-ATOMIC_TO_SYMBOL = {1: 'H', 6: 'C', 7: 'N', 8: 'O', 9: 'F'}
-
-# Atom type mappings for different datasets (heavy atoms only for QM9)
-# Index 0 is reserved for "empty" atom (padding positions)
-ATOM_TYPES = {
-    'qm9': ['X', 'C', 'N', 'O', 'F'],  # X=empty, then heavy atoms (H added by RDKit)
-    'zinc250k': ['X', 'C', 'N', 'O', 'F', 'S', 'Cl', 'Br', 'I', 'P'],
+# Token to base atom type mapping for GEEL format
+# Maps token strings like '[C]', '[CH]', '[C-]' etc. to base element
+TOKEN_TO_ATOM = {
+    # Carbon variants
+    '[C]': 'C', '[CH]': 'C', '[CH2]': 'C', '[CH3]': 'C',
+    '[C-]': 'C', '[CH-]': 'C', '[C+]': 'C',
+    # Nitrogen variants
+    '[N]': 'N', '[NH]': 'N', '[NH2]': 'N', '[NH3]': 'N',
+    '[N+]': 'N', '[N-]': 'N', '[NH+]': 'N', '[NH2+]': 'N', '[NH3+]': 'N',
+    # Oxygen variants
+    '[O]': 'O', '[OH]': 'O', '[O-]': 'O', '[O+]': 'O',
+    # Halogens
+    '[F]': 'F', '[Cl]': 'Cl', '[Br]': 'Br', '[I]': 'I',
+    # Other atoms
+    '[S]': 'S', '[SH]': 'S', '[S-]': 'S', '[S+]': 'S',
+    '[P]': 'P', '[PH]': 'P',
 }
 
 # Bond type mappings (0: no bond, 1: single, 2: double, 3: triple, 4: aromatic)
@@ -30,31 +35,30 @@ BOND_TYPES = {
     'aromatic': 4,
 }
 
+# GEEL edge label to bond type mapping
+# GEEL uses: 5=single, 6=double, 7=triple, 8=aromatic
+# We use: 1=single, 2=double, 3=triple, 4=aromatic
+GEEL_EDGE_TO_BOND = {5: 1, 6: 2, 7: 3, 8: 4}
+
+# Atom type mappings for different datasets (heavy atoms only)
+# Index 0 is reserved for "empty" atom (padding positions)
+ATOM_TYPES = {
+    'qm9': ['X', 'C', 'N', 'O', 'F'],  # X=empty, then heavy atoms
+    'zinc250k': ['X', 'C', 'N', 'O', 'F', 'S', 'Cl', 'Br', 'I', 'P'],
+}
+
 # Maximum number of heavy atoms for each dataset
 MAX_ATOMS = {
-    'qm9': 9,  # Heavy atoms only (C, N, O, F)
+    'qm9': 9,
     'zinc250k': 38,
 }
 
 
-def _extract_edge_types(data) -> np.ndarray:
-    """Extract edge types from PyG data object.
-
-    Returns array of bond types (1-indexed: 1=single, 2=double, 3=triple, 4=aromatic).
-    """
-    edge_index = data.edge_index.numpy()
-
-    if not hasattr(data, 'edge_attr') or data.edge_attr is None:
-        return np.ones(edge_index.shape[1], dtype=np.int64)
-
-    edge_attr = data.edge_attr.numpy()
-    if len(edge_attr.shape) > 1:
-        return edge_attr.argmax(axis=1) + 1
-    return edge_attr + 1
-
-
 class MoleculeDataset(Dataset):
-    """Base dataset for molecule generation with adjacency matrix representation."""
+    """Dataset for molecule generation with adjacency matrix representation.
+
+    Loads data from GEEL repository pickle files containing NetworkX graphs.
+    """
 
     def __init__(
         self,
@@ -76,6 +80,9 @@ class MoleculeDataset(Dataset):
         self.num_bond_types = 5  # 0: none, 1: single, 2: double, 3: triple, 4: aromatic
         self.debug = debug
         self.debug_samples = debug_samples
+
+        # Build atom type lookup (skip 'X' at index 0)
+        self.atom_to_idx = {atom: i for i, atom in enumerate(self.atom_types) if atom != 'X'}
 
         self.processed_path = self.root / f'{self.dataset_name}_{split}_processed.pkl'
 
@@ -112,9 +119,9 @@ class MoleculeDataset(Dataset):
         self.root.mkdir(parents=True, exist_ok=True)
 
         if self.dataset_name == 'qm9':
-            self._process_qm9()
+            self._process_geel_dataset('qm9')
         elif self.dataset_name == 'zinc250k':
-            self._process_zinc250k()
+            self._process_geel_dataset('zinc250k')
         else:
             raise ValueError(f"Unknown dataset: {self.dataset_name}")
 
@@ -127,62 +134,49 @@ class MoleculeDataset(Dataset):
         with open(self.processed_path, 'wb') as f:
             pickle.dump(data, f)
 
-    def _process_qm9(self):
-        """Process QM9 dataset."""
-        dataset = QM9(root=str(self.root / 'raw' / 'qm9'))
+    def _process_geel_dataset(self, dataset_name: str):
+        """Process dataset from GEEL pickle files."""
+        # Determine file paths
+        if dataset_name == 'qm9':
+            graph_path = self.root / 'qm9' / f'qm9_graph_{self.split}.pkl'
+            smiles_path = self.root / 'qm9' / f'qm9_smiles_{self.split}.txt'
+        else:  # zinc250k
+            graph_path = self.root / 'zinc250k' / f'zinc_graph_{self.split}.pkl'
+            smiles_path = self.root / 'zinc250k' / f'zinc_smiles_{self.split}.txt'
 
-        # Split indices
-        n_total = len(dataset)
-        n_train = int(0.8 * n_total)
-        n_val = int(0.1 * n_total)
+        if not graph_path.exists():
+            raise FileNotFoundError(
+                f"Dataset not found at {graph_path}. "
+                f"Run 'bash scripts/data/download_datasets.sh' to download."
+            )
 
-        indices = np.random.RandomState(42).permutation(n_total)
-        if self.split == 'train':
-            indices = indices[:n_train]
-        elif self.split == 'val':
-            indices = indices[n_train:n_train + n_val]
-        else:  # test
-            indices = indices[n_train + n_val:]
+        # Load NetworkX graphs
+        with open(graph_path, 'rb') as f:
+            graphs = pickle.load(f)
 
-        self._process_pyg_dataset(dataset, indices)
+        # Load SMILES if available
+        smiles_list = []
+        if smiles_path.exists():
+            with open(smiles_path, 'r') as f:
+                smiles_list = [line.strip() for line in f]
 
-    def _process_zinc250k(self):
-        """Process ZINC250k dataset."""
-        # Use ZINC subset from PyG
-        split_map = {'train': 'train', 'val': 'val', 'test': 'test'}
-        dataset = ZINC(
-            root=str(self.root / 'raw' / 'zinc'),
-            subset=True,
-            split=split_map[self.split],
-        )
-        indices = list(range(len(dataset)))
-        self._process_pyg_dataset(dataset, indices)
+        self._process_networkx_graphs(graphs, smiles_list)
 
-    def _process_pyg_dataset(self, dataset, indices: List[int]):
-        """Convert PyG dataset to adjacency matrix format (heavy atoms only for QM9)."""
+    def _process_networkx_graphs(self, graphs: List, smiles_list: List[str]):
+        """Convert NetworkX graphs to adjacency matrix format."""
         self.node_features = []
         self.adj_matrices = []
         self.num_atoms = []
         self.smiles_list = []
 
-        # Skip 'X' (empty) at index 0, real atoms start at index 1
-        atom_type_to_idx = {atom: i for i, atom in enumerate(self.atom_types) if atom != 'X'}
-
-        for idx in tqdm(indices, desc=f"Processing {self.dataset_name} {self.split}"):
-            data = dataset[idx]
-
-            if hasattr(data, 'z'):
-                result = self._process_qm9_molecule(data, atom_type_to_idx)
-            else:
-                result = self._process_zinc_molecule(data)
-
+        for idx, g in enumerate(tqdm(graphs, desc=f"Processing {self.dataset_name} {self.split}")):
+            result = self._process_networkx_molecule(g)
             if result is None:
                 continue
 
             node_types, num_nodes, adj = result
 
             # Create padded node features (one-hot encoded)
-            # Index 0 = empty (padding), indices 1+ = real atom types
             node_feat = np.zeros((self.max_atoms, self.num_atom_types), dtype=np.float32)
             node_feat[:, 0] = 1.0  # Default all positions to "empty"
             for i, t in enumerate(node_types):
@@ -193,64 +187,51 @@ class MoleculeDataset(Dataset):
             self.node_features.append(node_feat)
             self.adj_matrices.append(adj)
             self.num_atoms.append(num_nodes)
+            if idx < len(smiles_list):
+                self.smiles_list.append(smiles_list[idx])
 
         self.node_features = np.array(self.node_features)
         self.adj_matrices = np.array(self.adj_matrices)
         self.num_atoms = np.array(self.num_atoms)
 
-    def _process_qm9_molecule(
-        self, data, atom_type_to_idx: dict
-    ) -> Optional[Tuple[List[int], int, np.ndarray]]:
-        """Process a single QM9 molecule, filtering to heavy atoms only."""
-        z = data.z.numpy()
-        edge_index = data.edge_index.numpy()
-
-        # Filter to heavy atoms only (exclude H)
-        heavy_indices = np.where(z != 1)[0]
-        num_heavy = len(heavy_indices)
-
-        if num_heavy > self.max_atoms or num_heavy == 0:
+    def _process_networkx_molecule(self, g) -> Optional[Tuple[List[int], int, np.ndarray]]:
+        """Process a single NetworkX graph molecule."""
+        num_nodes = g.number_of_nodes()
+        if num_nodes > self.max_atoms or num_nodes == 0:
             return None
 
-        # Map old indices to new indices for heavy atoms
-        old_to_new = {old: new for new, old in enumerate(heavy_indices)}
-
-        # Get heavy atom types
+        # Extract node types from 'token' attribute
         node_types = []
-        for atom_idx in heavy_indices:
-            symbol = ATOMIC_TO_SYMBOL.get(z[atom_idx])
-            if symbol is None or symbol not in atom_type_to_idx:
-                return None
-            node_types.append(atom_type_to_idx[symbol])
+        for node_id in range(num_nodes):
+            node_data = g.nodes[node_id]
+            token = node_data.get('token', node_data.get('x'))
 
-        # Create adjacency matrix with only heavy atom edges
-        edge_types = _extract_edge_types(data)
+            # Map token to base atom type
+            base_atom = TOKEN_TO_ATOM.get(token)
+            if base_atom is None:
+                # Try to extract atom from token format [X...] -> X
+                if token and token.startswith('[') and token.endswith(']'):
+                    # Extract first letter(s) as element symbol
+                    inner = token[1:-1]
+                    # Handle cases like 'CH', 'NH+', etc.
+                    if inner and inner[0].isupper():
+                        elem = inner[0]
+                        if len(inner) > 1 and inner[1].islower():
+                            elem += inner[1]
+                        base_atom = elem
+
+            if base_atom is None or base_atom not in self.atom_to_idx:
+                return None  # Skip molecules with unknown atom types
+
+            node_types.append(self.atom_to_idx[base_atom])
+
+        # Create adjacency matrix from edges
         adj = np.zeros((self.max_atoms, self.max_atoms), dtype=np.int64)
-
-        for i in range(edge_index.shape[1]):
-            src, dst = edge_index[0, i], edge_index[1, i]
-            if src in old_to_new and dst in old_to_new:
-                adj[old_to_new[src], old_to_new[dst]] = edge_types[i]
-
-        return node_types, num_heavy, adj
-
-    def _process_zinc_molecule(self, data) -> Optional[Tuple[List[int], int, np.ndarray]]:
-        """Process a single ZINC molecule (already heavy atoms only)."""
-        num_nodes = data.x.size(0)
-        if num_nodes > self.max_atoms:
-            return None
-
-        node_types = data.x.squeeze().tolist()
-        if isinstance(node_types, int):
-            node_types = [node_types]
-
-        edge_index = data.edge_index.numpy()
-        edge_types = _extract_edge_types(data)
-
-        adj = np.zeros((self.max_atoms, self.max_atoms), dtype=np.int64)
-        for i in range(edge_index.shape[1]):
-            src, dst = edge_index[0, i], edge_index[1, i]
-            adj[src, dst] = edge_types[i]
+        for src, dst, edge_data in g.edges(data=True):
+            edge_label = edge_data.get('label', edge_data.get('edge_attr', 5))
+            bond_type = GEEL_EDGE_TO_BOND.get(edge_label, 1)  # Default to single bond
+            adj[src, dst] = bond_type
+            adj[dst, src] = bond_type  # Symmetric for undirected graphs
 
         return node_types, num_nodes, adj
 
