@@ -1,6 +1,9 @@
-# Data and outputs (root data directory only)
-/data/
-!/data/.gitkeep
+# Experiment outputs (temporary - can be cleaned with rm -rf data/runs/*)
+/data/runs/
+!/data/runs/.gitkeep
+
+# Datasets (large files, handled separately)
+/data/datasets/
 
 # Scratch directory
 scratch/*

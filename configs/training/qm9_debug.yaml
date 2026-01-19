@@ -1,7 +1,7 @@
 # QM9 Debug Configuration - Small dataset for rapid debugging
 # Optimized settings achieve loss ~0.515 (node=0.507, edge=0.008)
 
-output_dir: "data/qm9_debug"
+output_dir: "data/runs/qm9_debug"
 seed: 42
 device: "cuda"
 

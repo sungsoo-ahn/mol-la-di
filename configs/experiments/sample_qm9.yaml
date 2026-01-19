@@ -1,8 +1,8 @@
 # QM9 Sampling Configuration
 
-output_dir: "data/qm9_ar_baseline/samples"
-checkpoint_dir: "data/qm9_ar_baseline"
-checkpoint_path: "data/qm9_ar_baseline/checkpoints/best.pt"
+output_dir: "data/runs/qm9_ar_baseline/samples"
+checkpoint_dir: "data/runs/qm9_ar_baseline"
+checkpoint_path: "data/runs/qm9_ar_baseline/checkpoints/best.pt"
 
 seed: 42
 device: "cuda"

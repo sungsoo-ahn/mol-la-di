@@ -1,6 +1,6 @@
 # QM9 Autoregressive Transformer Training Configuration
 
-output_dir: "data/qm9_ar_baseline"
+output_dir: "data/runs/qm9_ar_baseline"
 seed: 42
 device: "cuda"
 

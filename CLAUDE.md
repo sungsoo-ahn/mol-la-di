@@ -37,18 +37,32 @@ All configuration must be in YAML files in this directory.
 - Use descriptive names for your configs
 - Structure:
   ```yaml
-  output_dir: "data/experiment_name"
+  output_dir: "data/runs/experiment_name"
   experiment:
     epochs: 100
     num_runs: 3
   # ... other config
   ```
 
-### `/data/` - Output Directory
-All experiment outputs go here, organized by `output_dir` from configs.
-- This directory is gitignored
-- Each run creates subdirectories: `figures/`, `results/`, `logs/`
-- Directory structure is auto-created by the code
+### `/data/` - Data Directory
+Contains both permanent datasets and temporary experiment outputs.
+
+```
+data/
+├── datasets/     # PERMANENT - preprocessed data & raw downloads
+│   ├── *.pkl
+│   └── raw/
+├── runs/         # TEMPORARY - all experiment outputs
+│   ├── qm9_debug/
+│   ├── qm9_ar_baseline/
+│   └── ...
+└── .gitkeep
+```
+
+- `data/datasets/` - Permanent datasets (preprocessed .pkl files and raw downloads)
+- `data/runs/` - Temporary experiment outputs (gitignored, can be safely deleted)
+- Each run creates subdirectories: `figures/`, `results/`, `logs/`, `checkpoints/`
+- **Cleanup command:** `rm -rf data/runs/*` or `bash scripts/cleanup.sh`
 
 ### `/scratch/` - Temporary Work Directory
 Freeform directory for temporary tests, one-off scripts, and experimental code.
@@ -153,7 +167,8 @@ output_dir/
 
 ## Git Conventions
 
-- `/data/` is gitignored - never commit experiment outputs
+- `/data/runs/` is gitignored - experiment outputs are temporary
+- `/data/datasets/` is gitignored - datasets are large and handled separately
 - `.env` is gitignored - use `.env.example` as template
 - `uv.lock` is committed for reproducibility
 - Commit messages should be descriptive
@@ -171,6 +186,9 @@ Before committing:
 ```bash
 # Run experiment
 bash scripts/run_experiment.sh
+
+# Clean up experiment outputs (preserves datasets)
+bash scripts/cleanup.sh
 
 # Add new package
 uv add package_name

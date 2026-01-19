@@ -1,6 +1,6 @@
 # ZINC250k Autoregressive Transformer Training Configuration
 
-output_dir: "data/zinc250k_ar_baseline"
+output_dir: "data/runs/zinc250k_ar_baseline"
 seed: 42
 device: "cuda"
 
