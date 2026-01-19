@@ -1,4 +1,4 @@
-# QM9 Diffusion Debug Config
+# QM9 Diffusion Debug Config (RAE mode)
 # Fast training for testing
 
 output_dir: "data/runs/qm9_diffusion_debug"
@@ -13,15 +13,19 @@ data:
   debug: true
   debug_samples: 128
 
-# VAE checkpoint to use
-vae:
-  checkpoint: "data/runs/qm9_vae_debug/checkpoints/best.pt"
+# Frozen MAE encoder (provides latent representations)
+encoder:
+  checkpoint: "data/runs/qm9_mae/checkpoints/best.pt"
+  d_latent: 64
+
+# Frozen RAE decoder (decodes latents to molecules)
+rae_decoder:
+  checkpoint: "data/runs/qm9_rae_debug/checkpoints/best.pt"
 
 model:
-  # These will be loaded from VAE checkpoint
   num_atom_types: 5
   num_bond_types: 5
-  d_latent: 32
+  d_latent: 64
 
 diffusion:
   d_model: 128
