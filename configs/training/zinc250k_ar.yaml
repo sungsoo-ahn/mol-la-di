@@ -21,17 +21,17 @@ model:
   dim_feedforward: 2048
   dropout: 0.1
 
-# Training settings - optimized from medium benchmark experiments
+# Training settings - optimized from QM9 medium benchmark experiments
 training:
   epochs: 200
-  batch_size: 64
-  eval_batch_size: 128
-  lr: 5.0e-4  # Optimized: 10x higher LR with warmup
-  weight_decay: 0.01
-  max_grad_norm: 1.0  # Gradient clipping for stability
-  warmup_epochs: 10  # Essential for higher LR
+  batch_size: 32
+  eval_batch_size: 64
+  lr: 1.0e-3  # Best LR from QM9 experiments
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  warmup_epochs: 10
   use_scheduler: true
-  min_lr: 1.0e-6
+  min_lr: 1.0e-5
   save_every: 20
   eval_every: 20
 
@@ -40,3 +40,9 @@ eval:
   n_samples: 1000
   final_n_samples: 10000
   temperature: 1.0
+
+# Weights & Biases settings
+wandb:
+  enabled: true
+  project: "molecule-generation"
+  name: "zinc250k_ar_baseline"
