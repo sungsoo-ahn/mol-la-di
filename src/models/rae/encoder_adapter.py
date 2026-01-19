@@ -105,23 +105,6 @@ class MAEEncoderAdapter(nn.Module):
 
         return z
 
-    @torch.no_grad()
-    def encode_no_grad(
-        self,
-        node_features: torch.Tensor,
-        adj_matrix: torch.Tensor,
-    ) -> torch.Tensor:
-        """Encode molecules without computing gradients (for inference/encoding datasets).
-
-        Args:
-            node_features: One-hot atom types (B, N, num_atom_types)
-            adj_matrix: Bond types (B, N, N)
-
-        Returns:
-            z: Latent representations (B, N, d_latent)
-        """
-        return self.encode(node_features, adj_matrix)
-
 
 def load_mae_encoder_adapter(
     mae_checkpoint: str,

@@ -123,7 +123,7 @@ class TransformerARModel(nn.Module):
         self.register_buffer('causal_mask', mask)
 
     def _flatten_adj_to_seq(self, adj: torch.Tensor) -> torch.Tensor:
-        """Convert upper triangular adjacency matrix to sequence.
+        """Convert upper triangular adjacency matrix to sequence (vectorized).
 
         Args:
             adj: (batch, max_atoms, max_atoms) adjacency matrix
@@ -131,15 +131,11 @@ class TransformerARModel(nn.Module):
         Returns:
             (batch, num_edge_tokens) flattened upper triangular
         """
-        batch_size = adj.size(0)
-        edge_seq = []
-        for i in range(self.max_atoms):
-            for j in range(i + 1, self.max_atoms):
-                edge_seq.append(adj[:, i, j])
-        return torch.stack(edge_seq, dim=1)
+        idx_i, idx_j = torch.triu_indices(self.max_atoms, self.max_atoms, offset=1, device=adj.device)
+        return adj[:, idx_i, idx_j]
 
     def _seq_to_adj(self, edge_seq: torch.Tensor) -> torch.Tensor:
-        """Convert sequence back to adjacency matrix.
+        """Convert sequence back to adjacency matrix (vectorized).
 
         Args:
             edge_seq: (batch, num_edge_tokens) flattened upper triangular
@@ -150,23 +146,10 @@ class TransformerARModel(nn.Module):
         batch_size = edge_seq.size(0)
         adj = torch.zeros(batch_size, self.max_atoms, self.max_atoms,
                          dtype=edge_seq.dtype, device=edge_seq.device)
-        idx = 0
-        for i in range(self.max_atoms):
-            for j in range(i + 1, self.max_atoms):
-                adj[:, i, j] = edge_seq[:, idx]
-                adj[:, j, i] = edge_seq[:, idx]  # Symmetric
-                idx += 1
+        idx_i, idx_j = torch.triu_indices(self.max_atoms, self.max_atoms, offset=1, device=edge_seq.device)
+        adj[:, idx_i, idx_j] = edge_seq
+        adj[:, idx_j, idx_i] = edge_seq  # Symmetric
         return adj
-
-    def _get_edge_position_info(self, seq_idx: int) -> Tuple[int, int]:
-        """Get (row, col) indices for an edge sequence position."""
-        idx = 0
-        for i in range(self.max_atoms):
-            for j in range(i + 1, self.max_atoms):
-                if idx == seq_idx:
-                    return (i, j)
-                idx += 1
-        raise ValueError(f"Invalid sequence index: {seq_idx}")
 
     def forward(
         self,
@@ -293,7 +276,10 @@ class TransformerARModel(nn.Module):
         temperature: float = 1.0,
         device: Optional[torch.device] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Sample molecules autoregressively.
+        """Sample molecules autoregressively with embedding caching.
+
+        Optimized to compute embeddings only for new tokens, not the entire
+        sequence at each step.
 
         Args:
             batch_size: number of molecules to sample
@@ -309,28 +295,25 @@ class TransformerARModel(nn.Module):
 
         self.eval()
 
-        # Initialize with start token
-        seq_embed = self.start_token.expand(batch_size, -1, -1).clone()
+        # Pre-compute start token embedding (fully embedded, ready for transformer)
+        start_embed = self.start_token.expand(batch_size, -1, -1) * self.embed_scale
+        start_embed = start_embed + self.token_type_embedding(torch.zeros(batch_size, 1, dtype=torch.long, device=device))
+        start_embed = start_embed + self.pos_embedding(torch.zeros(1, dtype=torch.long, device=device))
+
+        # Cache for fully-embedded tokens (already scaled, with type and pos embeddings)
+        cached_embed = start_embed  # (batch, 1, d_model)
 
         sampled_nodes = []
         sampled_edges = []
 
         # Sample nodes first
         for i in range(self.num_node_tokens):
-            # Scale and add token type embedding
-            curr_embed = seq_embed * self.embed_scale
-            token_types = torch.zeros(batch_size, seq_embed.size(1), dtype=torch.long, device=device)
-            curr_embed = curr_embed + self.token_type_embedding(token_types)
-
-            # Add learned positional embedding
-            positions = torch.arange(seq_embed.size(1), device=device)
-            curr_embed = curr_embed + self.pos_embedding(positions)
-
             # Get causal mask for current length
-            curr_mask = self.causal_mask[:seq_embed.size(1), :seq_embed.size(1)]
+            curr_len = cached_embed.size(1)
+            curr_mask = self.causal_mask[:curr_len, :curr_len]
 
-            # Forward pass
-            output = self.transformer(curr_embed, mask=curr_mask)
+            # Forward pass using cached embeddings
+            output = self.transformer(cached_embed, mask=curr_mask)
 
             # Get logits for next token
             logits = self.node_head(output[:, -1]) / temperature
@@ -339,37 +322,39 @@ class TransformerARModel(nn.Module):
 
             sampled_nodes.append(next_token)
 
-            # Embed and append (unscaled, scaling applied later)
-            next_embed = self.node_embedding(next_token).unsqueeze(1)
-            seq_embed = torch.cat([seq_embed, next_embed], dim=1)
+            # Compute embedding ONLY for new token (with all modifications applied)
+            next_embed = self.node_embedding(next_token).unsqueeze(1) * self.embed_scale
+            next_embed = next_embed + self.token_type_embedding(torch.zeros(batch_size, 1, dtype=torch.long, device=device))
+            next_embed = next_embed + self.pos_embedding(torch.tensor([i + 1], dtype=torch.long, device=device))
+
+            # Append to cache
+            cached_embed = torch.cat([cached_embed, next_embed], dim=1)
 
         # Sample edges
         for i in range(self.num_edge_tokens):
-            # Scale and add token type embedding
-            curr_embed = seq_embed * self.embed_scale
-            token_types = torch.cat([
-                torch.zeros(batch_size, 1 + self.num_node_tokens, dtype=torch.long, device=device),
-                torch.ones(batch_size, i, dtype=torch.long, device=device),
-            ], dim=1) if i > 0 else torch.zeros(batch_size, 1 + self.num_node_tokens, dtype=torch.long, device=device)
+            # Get causal mask for current length
+            curr_len = cached_embed.size(1)
+            curr_mask = self.causal_mask[:curr_len, :curr_len]
 
-            curr_embed = curr_embed + self.token_type_embedding(token_types)
+            # Forward pass using cached embeddings
+            output = self.transformer(cached_embed, mask=curr_mask)
 
-            # Add learned positional embedding
-            positions = torch.arange(seq_embed.size(1), device=device)
-            curr_embed = curr_embed + self.pos_embedding(positions)
-
-            curr_mask = self.causal_mask[:seq_embed.size(1), :seq_embed.size(1)]
-
-            output = self.transformer(curr_embed, mask=curr_mask)
-
+            # Get logits for next token
             logits = self.edge_head(output[:, -1]) / temperature
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, 1).squeeze(-1)
 
             sampled_edges.append(next_token)
 
-            next_embed = self.edge_embedding(next_token).unsqueeze(1)
-            seq_embed = torch.cat([seq_embed, next_embed], dim=1)
+            # Compute embedding ONLY for new token (edges have token_type=1)
+            next_embed = self.edge_embedding(next_token).unsqueeze(1) * self.embed_scale
+            next_embed = next_embed + self.token_type_embedding(torch.ones(batch_size, 1, dtype=torch.long, device=device))
+            # Position = 1 (start) + num_node_tokens + i
+            pos_idx = 1 + self.num_node_tokens + i
+            next_embed = next_embed + self.pos_embedding(torch.tensor([pos_idx], dtype=torch.long, device=device))
+
+            # Append to cache
+            cached_embed = torch.cat([cached_embed, next_embed], dim=1)
 
         # Convert to tensors
         node_types = torch.stack(sampled_nodes, dim=1)

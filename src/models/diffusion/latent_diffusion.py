@@ -1,7 +1,8 @@
 """Latent diffusion model for molecule generation.
 
-Uses RAE (Representation Autoencoder) architecture:
-- Frozen MAE encoder + trainable RAE decoder with noise augmentation
+Supports two latent modes:
+- "nodes_only": Node-wise latents from RAE encoder adapter (B, N, d_latent)
+- "nodes_and_edges": Combined node+edge latents from MAE encoder (B, N+E, d_latent)
 """
 
 import torch
@@ -16,7 +17,9 @@ from src.models.diffusion.dit_block import DiTBlock, TimestepEmbedding
 class LatentDiffusionModel(nn.Module):
     """Latent diffusion model using DiT architecture.
 
-    Operates on node-wise latent representations from the encoder.
+    Supports two latent modes:
+    - "nodes_only": Operates on node-wise latent representations (B, N, d_latent)
+    - "nodes_and_edges": Operates on combined node+edge sequence (B, N+E, d_latent)
     """
 
     def __init__(
@@ -30,19 +33,52 @@ class LatentDiffusionModel(nn.Module):
         max_atoms: int = 9,
         num_timesteps: int = 1000,
         beta_schedule: str = "cosine",
+        latent_mode: str = "nodes_only",
     ):
+        """Initialize LatentDiffusionModel.
+
+        Args:
+            d_latent: Dimension of latent space
+            d_model: Hidden dimension of diffusion transformer
+            nhead: Number of attention heads
+            num_layers: Number of DiT blocks
+            dim_feedforward: Feedforward dimension
+            dropout: Dropout probability
+            max_atoms: Maximum number of atoms (N)
+            num_timesteps: Number of diffusion timesteps
+            beta_schedule: Noise schedule type ("linear" or "cosine")
+            latent_mode: "nodes_only" or "nodes_and_edges"
+        """
         super().__init__()
+
+        if latent_mode not in ("nodes_only", "nodes_and_edges"):
+            raise ValueError(f"latent_mode must be 'nodes_only' or 'nodes_and_edges', got {latent_mode}")
 
         self.d_latent = d_latent
         self.d_model = d_model
         self.max_atoms = max_atoms
         self.num_timesteps = num_timesteps
+        self.latent_mode = latent_mode
+
+        # Compute sequence length based on mode
+        if latent_mode == "nodes_only":
+            self.num_edges = 0
+            self.seq_len = max_atoms
+        else:  # nodes_and_edges
+            self.num_edges = max_atoms * (max_atoms - 1) // 2
+            self.seq_len = max_atoms + self.num_edges
 
         # Input projection
         self.input_proj = nn.Linear(d_latent, d_model)
 
+        # Token type embedding (only for nodes_and_edges mode)
+        if latent_mode == "nodes_and_edges":
+            self.token_type_embedding = nn.Embedding(2, d_model)
+        else:
+            self.token_type_embedding = None
+
         # Positional embedding
-        self.pos_embedding = nn.Embedding(max_atoms, d_model)
+        self.pos_embedding = nn.Embedding(self.seq_len, d_model)
 
         # Timestep embedding
         self.time_embed = TimestepEmbedding(d_model)
@@ -85,20 +121,30 @@ class LatentDiffusionModel(nn.Module):
         """Predict noise from noisy latents.
 
         Args:
-            z_noisy: Noisy latents (B, N, d_latent)
+            z_noisy: Noisy latents (B, seq_len, d_latent)
             timesteps: Timestep indices (B,)
 
         Returns:
-            Noise prediction (B, N, d_latent)
+            Noise prediction (B, seq_len, d_latent)
         """
-        B, N, _ = z_noisy.shape
+        B, seq_len, _ = z_noisy.shape
         device = z_noisy.device
 
         # Input projection
-        x = self.input_proj(z_noisy)  # (B, N, d_model)
+        x = self.input_proj(z_noisy)  # (B, seq_len, d_model)
+
+        # Add token type embeddings (only for nodes_and_edges mode)
+        if self.token_type_embedding is not None:
+            N = self.max_atoms
+            E = self.num_edges
+            token_types = torch.cat([
+                torch.zeros(N, device=device, dtype=torch.long),
+                torch.ones(E, device=device, dtype=torch.long),
+            ])  # (N+E,)
+            x = x + self.token_type_embedding(token_types)
 
         # Add positional embeddings
-        positions = torch.arange(N, device=device)
+        positions = torch.arange(self.seq_len, device=device)
         x = x + self.pos_embedding(positions)
 
         # Timestep conditioning
@@ -126,7 +172,7 @@ class LatentDiffusionModel(nn.Module):
         """Compute diffusion loss.
 
         Args:
-            z_0: Clean latents (B, N, d_latent)
+            z_0: Clean latents (B, seq_len, d_latent)
 
         Returns:
             Dictionary with loss and metrics
@@ -172,11 +218,11 @@ class LatentDiffusionModel(nn.Module):
             num_inference_steps: Number of denoising steps
 
         Returns:
-            z_0: Sampled latents (B, N, d_latent)
+            z_0: Sampled latents (B, seq_len, d_latent)
         """
         self.eval()
 
-        shape = (num_samples, self.max_atoms, self.d_latent)
+        shape = (num_samples, self.seq_len, self.d_latent)
 
         # Move scheduler to device
         self.scheduler.to(device)
@@ -282,6 +328,149 @@ class LatentDiffusionWithRAE(nn.Module):
 
                 # Encode to latents using MAE encoder adapter
                 z = self.encoder_adapter.encode(node_features, adj_matrix)
+                all_latents.append(z.cpu())
+
+        return torch.cat(all_latents, dim=0)
+
+
+class LatentDiffusionWithMAE(nn.Module):
+    """Combined model for end-to-end sampling with MAE.
+
+    Uses frozen MAE encoder/decoder + diffusion model operating on
+    combined node+edge latent sequences.
+    """
+
+    def __init__(
+        self,
+        mae: nn.Module,
+        diffusion: LatentDiffusionModel,
+    ):
+        """Initialize combined model.
+
+        Args:
+            mae: Trained MoleculeMAE model (frozen)
+            diffusion: LatentDiffusionModel with latent_mode='nodes_and_edges'
+        """
+        super().__init__()
+        self.mae = mae
+        self.diffusion = diffusion
+
+    @torch.no_grad()
+    def sample(
+        self,
+        num_samples: int,
+        device: torch.device,
+        num_inference_steps: Optional[int] = None,
+        temperature: float = 1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Sample molecules end-to-end.
+
+        Args:
+            num_samples: Number of molecules to generate
+            device: Device to sample on
+            num_inference_steps: Number of diffusion steps
+            temperature: Decoding temperature
+
+        Returns:
+            node_types: (B, N) atom type indices
+            adj_matrix: (B, N, N) bond types
+        """
+        self.eval()
+
+        # Sample latents from diffusion model
+        z = self.diffusion.sample(
+            num_samples=num_samples,
+            device=device,
+            num_inference_steps=num_inference_steps,
+        )
+
+        # Decode latents to molecules using MAE decoder
+        node_types, adj_matrix = self.decode_latents(z, temperature=temperature)
+
+        return node_types, adj_matrix
+
+    def decode_latents(
+        self,
+        z: torch.Tensor,
+        temperature: float = 1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Decode diffusion latents to molecules using MAE decoder.
+
+        Uses mask=False so decoder uses actual latent content (not mask tokens).
+        Position embeddings are still added by the decoder.
+
+        Args:
+            z: Latent representations from diffusion (B, N+E, d_latent)
+            temperature: Sampling temperature
+
+        Returns:
+            node_types: (B, N) atom type indices
+            adj_matrix: (B, N, N) bond types
+        """
+        # Import here to avoid circular imports
+        from src.models.mae.masking import reconstruct_adj_from_edges
+
+        B = z.shape[0]
+        N = self.mae.max_atoms
+        E = self.mae.num_edges
+        device = z.device
+
+        # No masking = decoder uses actual latent content
+        node_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        edge_mask = torch.zeros(B, E, dtype=torch.bool, device=device)
+
+        # Decode using MAE decoder
+        node_logits, edge_logits = self.mae.decoder(z, node_mask, edge_mask)
+
+        # Apply temperature
+        if temperature != 1.0:
+            node_logits = node_logits / temperature
+            edge_logits = edge_logits / temperature
+
+        # Sample or argmax
+        if temperature > 0:
+            node_probs = F.softmax(node_logits, dim=-1)
+            edge_probs = F.softmax(edge_logits, dim=-1)
+
+            node_types = torch.multinomial(
+                node_probs.view(-1, self.mae.num_atom_types), 1
+            ).view(B, N)
+            edge_types = torch.multinomial(
+                edge_probs.view(-1, self.mae.num_bond_types), 1
+            ).view(B, E)
+        else:
+            node_types = node_logits.argmax(dim=-1)
+            edge_types = edge_logits.argmax(dim=-1)
+
+        # Reconstruct adjacency matrix from edge predictions
+        adj_matrix = reconstruct_adj_from_edges(edge_types.float(), N).long()
+
+        return node_types, adj_matrix
+
+    def encode_dataset(
+        self,
+        dataloader: torch.utils.data.DataLoader,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Encode entire dataset to latents for diffusion training.
+
+        Args:
+            dataloader: DataLoader with molecules
+            device: Device
+
+        Returns:
+            all_latents: (N_samples, seq_len, d_model) where seq_len = N + E
+        """
+        self.mae.eval()
+        all_latents = []
+
+        with torch.no_grad():
+            for batch in dataloader:
+                node_features = batch['node_features'].to(device)
+                adj_matrix = batch['adj_matrix'].to(device)
+
+                # Encode using MAE encoder (without masking)
+                z = self.mae.encode(node_features, adj_matrix)
                 all_latents.append(z.cpu())
 
         return torch.cat(all_latents, dim=0)
