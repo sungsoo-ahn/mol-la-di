@@ -323,7 +323,8 @@ def validate(model, dataloader, device):
 
 @torch.no_grad()
 def sample_and_evaluate(combined_model, evaluator, n_samples, device,
-                        num_inference_steps=100, temperature=1.0, batch_size=100):
+                        num_inference_steps=100, temperature=1.0, batch_size=100,
+                        z_mean=None, z_std=None):
     """Sample molecules and evaluate them."""
     combined_model.eval()
 
@@ -338,6 +339,8 @@ def sample_and_evaluate(combined_model, evaluator, n_samples, device,
             device=device,
             num_inference_steps=num_inference_steps,
             temperature=temperature,
+            z_mean=z_mean,
+            z_std=z_std,
         )
         all_node_types.append(node_types.cpu().numpy())
         all_adj_matrices.append(adj_matrix.cpu().numpy())
@@ -482,6 +485,27 @@ def main(config_path: str):
         val_latents = encode_dataset_rae(encoder_adapter, val_loader, device)
         logger.info(f"Val latents shape: {val_latents.shape}")
 
+    # Compute latent statistics for normalization
+    z_mean = train_latents.mean(dim=(0, 1), keepdim=True)  # (1, 1, d_latent)
+    z_std = train_latents.std(dim=(0, 1), keepdim=True)    # (1, 1, d_latent)
+
+    logger.info(f"Latent stats before normalization - mean: {z_mean.mean().item():.4f}, std: {z_std.mean().item():.4f}")
+    logger.info(f"Latent stats range - mean: [{z_mean.min().item():.4f}, {z_mean.max().item():.4f}], std: [{z_std.min().item():.4f}, {z_std.max().item():.4f}]")
+
+    # Normalize to N(0, 1)
+    train_latents = (train_latents - z_mean) / (z_std + 1e-6)
+    val_latents = (val_latents - z_mean) / (z_std + 1e-6)
+
+    # Save normalization params
+    norm_params_path = output_dir / 'latent_norm_params.pt'
+    torch.save({'z_mean': z_mean, 'z_std': z_std}, norm_params_path)
+    logger.info(f"Saved latent normalization params to {norm_params_path}")
+
+    # Verify normalization
+    train_normalized_mean = train_latents.mean().item()
+    train_normalized_std = train_latents.std().item()
+    logger.info(f"Latent stats after normalization - mean: {train_normalized_mean:.4f}, std: {train_normalized_std:.4f}")
+
     # Create latent dataloaders
     train_config = config['training']
     batch_size = train_config.get('batch_size', 128)
@@ -603,6 +627,8 @@ def main(config_path: str):
                 device=device,
                 num_inference_steps=num_inference_steps,
                 temperature=config.get('eval', {}).get('temperature', 1.0),
+                z_mean=z_mean,
+                z_std=z_std,
             )
             logger.info(f"Epoch {epoch} - Sample metrics: {sample_metrics}")
 
@@ -641,6 +667,8 @@ def main(config_path: str):
         device=device,
         num_inference_steps=num_inference_steps,
         temperature=config.get('eval', {}).get('temperature', 1.0),
+        z_mean=z_mean,
+        z_std=z_std,
     )
     logger.info(f"Final metrics: {final_metrics}")
 

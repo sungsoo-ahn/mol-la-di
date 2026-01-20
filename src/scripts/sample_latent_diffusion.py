@@ -127,6 +127,8 @@ def sample_molecules(
     num_inference_steps: int = 100,
     temperature: float = 1.0,
     batch_size: int = 100,
+    z_mean: torch.Tensor = None,
+    z_std: torch.Tensor = None,
 ) -> tuple:
     """Sample molecules from the combined model."""
     combined_model.eval()
@@ -142,6 +144,8 @@ def sample_molecules(
             device=device,
             num_inference_steps=num_inference_steps,
             temperature=temperature,
+            z_mean=z_mean,
+            z_std=z_std,
         )
         all_node_types.append(node_types.cpu().numpy())
         all_adj_matrices.append(adj_matrix.cpu().numpy())
@@ -212,6 +216,22 @@ def main(config_path: str):
     logger.info(f"Loading diffusion model from: {diffusion_checkpoint}")
     diffusion = load_diffusion(diffusion_checkpoint, config, device)
 
+    # Load latent normalization params if available
+    # Look for latent_norm_params.pt in the same directory as the diffusion checkpoint
+    diffusion_dir = Path(diffusion_checkpoint).parent.parent  # Go up from checkpoints/ to run dir
+    norm_params_path = diffusion_dir / 'latent_norm_params.pt'
+
+    z_mean, z_std = None, None
+    if norm_params_path.exists():
+        norm_params = torch.load(norm_params_path, map_location=device, weights_only=False)
+        z_mean = norm_params['z_mean']
+        z_std = norm_params['z_std']
+        logger.info(f"Loaded latent normalization params from {norm_params_path}")
+        logger.info(f"z_mean shape: {z_mean.shape}, z_std shape: {z_std.shape}")
+    else:
+        logger.warning(f"No latent normalization params found at {norm_params_path}")
+        logger.warning("Sampling without denormalization (may result in lower validity)")
+
     # Combined model
     combined_model = LatentDiffusionWithRAE(encoder_adapter, rae_decoder, diffusion)
 
@@ -244,6 +264,8 @@ def main(config_path: str):
         num_inference_steps=num_inference_steps,
         temperature=temperature,
         batch_size=batch_size,
+        z_mean=z_mean,
+        z_std=z_std,
     )
 
     # Evaluate

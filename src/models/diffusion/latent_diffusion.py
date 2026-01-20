@@ -277,6 +277,8 @@ class LatentDiffusionWithRAE(nn.Module):
         device: torch.device,
         num_inference_steps: Optional[int] = None,
         temperature: float = 1.0,
+        z_mean: Optional[torch.Tensor] = None,
+        z_std: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Sample molecules end-to-end.
 
@@ -285,6 +287,8 @@ class LatentDiffusionWithRAE(nn.Module):
             device: Device to sample on
             num_inference_steps: Number of diffusion steps
             temperature: Decoding temperature
+            z_mean: Optional latent mean for denormalization (1, 1, d_latent)
+            z_std: Optional latent std for denormalization (1, 1, d_latent)
 
         Returns:
             node_types: (B, N) atom type indices
@@ -298,6 +302,10 @@ class LatentDiffusionWithRAE(nn.Module):
             device=device,
             num_inference_steps=num_inference_steps,
         )
+
+        # Denormalize if normalization params provided
+        if z_mean is not None and z_std is not None:
+            z = z * z_std.to(device) + z_mean.to(device)
 
         # Decode to molecules using RAE decoder
         node_types, adj_matrix = self.rae_decoder.decode(z, temperature=temperature, hard=True)
@@ -362,6 +370,8 @@ class LatentDiffusionWithMAE(nn.Module):
         device: torch.device,
         num_inference_steps: Optional[int] = None,
         temperature: float = 1.0,
+        z_mean: Optional[torch.Tensor] = None,
+        z_std: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Sample molecules end-to-end.
 
@@ -370,6 +380,8 @@ class LatentDiffusionWithMAE(nn.Module):
             device: Device to sample on
             num_inference_steps: Number of diffusion steps
             temperature: Decoding temperature
+            z_mean: Optional latent mean for denormalization (1, 1, d_latent)
+            z_std: Optional latent std for denormalization (1, 1, d_latent)
 
         Returns:
             node_types: (B, N) atom type indices
@@ -383,6 +395,10 @@ class LatentDiffusionWithMAE(nn.Module):
             device=device,
             num_inference_steps=num_inference_steps,
         )
+
+        # Denormalize if normalization params provided
+        if z_mean is not None and z_std is not None:
+            z = z * z_std.to(device) + z_mean.to(device)
 
         # Decode latents to molecules using MAE decoder
         node_types, adj_matrix = self.decode_latents(z, temperature=temperature)
